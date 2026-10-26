@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.pem
+*.key
+*_key.json
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+agents/state/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS
+.DS_Store
