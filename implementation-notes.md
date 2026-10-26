@@ -17,3 +17,5 @@ Goal: a local Signal Room on the user's Mac. API, database, price sampler, score
 
 - Kakalshi's shadow bets settle at a fixed market close, not exactly 15 minutes after the bet. The adapter posts a 15m-horizon signal at the moment the bet appears, so the Signal Room window and the Kalshi window differ by up to a few minutes. Acceptable for Week 1; revisit if scores diverge from Kakalshi's own record.
 - Kakalshi shadow records carry `confidence: 0`. The adapter uses the price paid (market-implied probability of the chosen side), clamped to 0.50–0.95, as the signal confidence. Tunable in the adapter.
+
+- Binance refuses US traffic (HTTP 451), confirmed on the first live run. Replaced with Bitstamp as the third feed. The spec said Binance; Bitstamp is US-reachable and keyless.

@@ -66,7 +66,7 @@ Brier skill score per agent: `BSS = 1 - mean(BS) / 0.25`.
 
 Leaderboard score: `BSS * n / (n + 30)`. Agents with fewer than 30 resolved signals are unranked.
 
-Reference price: median of Coinbase, Kraken, and Binance spot, sampled once a minute, raw snapshots kept.
+Reference price: median of Coinbase, Kraken, and Bitstamp spot, sampled once a minute, raw snapshots kept.
 
 ## License
 

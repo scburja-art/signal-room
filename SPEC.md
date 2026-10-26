@@ -48,7 +48,7 @@ Two separate APIs on two separate hostnames. The agent API can write. The portal
 
 **Portal API** (`portal.`): read-only, wallet-signature login, session-scoped to one owner. Serves the owner's own agents in full, the public leaderboard, and nothing else. No signal bodies, ever.
 
-Reference price: median of three spot feeds (Coinbase, Kraken, Binance), sampled once a minute, each snapshot stored with the feed's own timestamp so any score can be replayed. Pairs at launch: BTC, ETH, SOL plus the next seven by volume, all versus USD.
+Reference price: median of three spot feeds (Coinbase, Kraken, Bitstamp), sampled once a minute, each snapshot stored with the feed's own timestamp so any score can be replayed. Pairs at launch: BTC, ETH, SOL plus the next seven by volume, all versus USD.
 
 ## Scoring and read credits
 
@@ -147,7 +147,7 @@ The platform's only revenue is a flat membership fee, paid in BTC, ETH, or SOL, 
 The whole platform is deterministic code. No model calls anywhere in the request path.
 
 - Python + FastAPI for both APIs, Postgres for storage, one cron process for scoring, credit minting, and the daily anchor.
-- Price feeds: public spot endpoints from Coinbase, Kraken, Binance (free, no keys).
+- Price feeds: public spot endpoints from Coinbase, Kraken, Bitstamp (free, no keys).
 - Payments: self-hosted BTCPay Server for membership invoices. Nothing else touches money.
 - Hosting: one $10–20/month VPS for the APIs, a second small box for BTCPay. Base Sepolia testnet for the anchor until week 3.
 
@@ -187,7 +187,7 @@ Week 1 runs entirely on your Mac. No domain, no VPS, no money, no accounts to cr
 1. Scaffold: repo, MIT license, one-command local start (API + Postgres + scorer), CLAUDE.md carrying your global rules, implementation-notes.md.
 2. Auth: wallet registration with signed challenge, API key hashed at rest, signed-request check on every write (nonce + 60-second window). EVM wallets only in Week 1; Solana wallet support is a Week 2 add.
 3. Signals: validation, reference-price stamp, hash, encrypted body, one-open-per-pair-per-horizon rule.
-4. Price sampler: Coinbase, Kraken, Binance public feeds, median per minute, raw snapshots stored with the feed's timestamp.
+4. Price sampler: Coinbase, Kraken, Bitstamp public feeds, median per minute, raw snapshots stored with the feed's timestamp.
 5. Scorer: resolve outcomes, Brier, credit minting, records with shrinkage, `/me`, `/agents/{id}`, `/leaderboard`.
 6. Seed agents: Kakalshi adapter, momentum control.
 7. Verify: tests for the scoring math against hand-computed examples, then a 24-hour live run with both agents posting. Done means the leaderboard shows real numbers and the control sits near zero.

@@ -1,4 +1,4 @@
-"""Reference prices: median of Coinbase, Kraken, and Binance spot, sampled once a minute.
+"""Reference prices: median of Coinbase, Kraken, and Bitstamp spot, sampled once a minute.
 
 Every raw feed value is stored with the feed's own timestamp so any score can be replayed.
 A feed that is down is skipped; the median is taken over whatever answered. If fewer than
@@ -39,13 +39,15 @@ def fetch_kraken(client: httpx.Client, pair: str) -> tuple[float, dt.datetime | 
     return float(result["c"][0]), None
 
 
-def fetch_binance(client: httpx.Client, pair: str) -> tuple[float, dt.datetime | None]:
-    r = client.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": f"{pair}USDT"}, timeout=TIMEOUT)
+def fetch_bitstamp(client: httpx.Client, pair: str) -> tuple[float, dt.datetime | None]:
+    r = client.get(f"https://www.bitstamp.net/api/v2/ticker/{pair.lower()}usd/", timeout=TIMEOUT)
     r.raise_for_status()
-    return float(r.json()["price"]), None
+    j = r.json()
+    t = dt.datetime.fromtimestamp(int(j["timestamp"]), dt.timezone.utc).replace(tzinfo=None) if "timestamp" in j else None
+    return float(j["last"]), t
 
 
-FEEDS = {"coinbase": fetch_coinbase, "kraken": fetch_kraken, "binance": fetch_binance}
+FEEDS = {"coinbase": fetch_coinbase, "kraken": fetch_kraken, "bitstamp": fetch_bitstamp}
 
 
 def sample_all(db: Session, client: httpx.Client | None = None, now: dt.datetime | None = None) -> dict[str, float]:
