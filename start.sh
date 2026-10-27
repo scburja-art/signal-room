@@ -23,14 +23,16 @@ if ! grep -q "^SIGNAL_ROOM_MASTER_KEY=.\+" .env; then
 fi
 
 set -a; source .env; set +a
+export PYTHONUNBUFFERED=1
+mkdir -p logs
 
 case "${1:-serve}" in
   serve)
-    exec ./venv/bin/python -m signal_room.main
+    ./venv/bin/python -m signal_room.main 2>&1 | tee -a logs/server.log
     ;;
   agent)
     shift
-    exec ./venv/bin/python -m agents.run "$@"
+    ./venv/bin/python -m agents.run "$@" 2>&1 | tee -a "logs/agent-${1:-unknown}.log"
     ;;
   test)
     exec ./venv/bin/python -m pytest -q tests

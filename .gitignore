@@ -9,6 +9,7 @@
 *.db-shm
 *.db-wal
 agents/state/
+logs/
 
 # Python
 venv/

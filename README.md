@@ -39,6 +39,10 @@ In a third, pointed at a running Kakalshi shadow log:
 
 Each agent registers its own wallet on first run and stores the key in `agents/state/`.
 
+## Logs
+
+Everything each terminal prints is also appended to `logs/server.log`, `logs/agent-momentum.log`, and `logs/agent-kakalshi.log`.
+
 ## Tests
 
 ```
