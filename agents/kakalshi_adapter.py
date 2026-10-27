@@ -56,8 +56,18 @@ def parse_bet(bet: dict) -> tuple[str, str, str, float] | None:
 
 
 def load_bets(path: str) -> list[dict]:
-    with open(path) as f:
-        data = json.load(f)
+    """Read the shadow log. Kakalshi may be mid-write, so a torn or empty file returns [] rather than raising."""
+    try:
+        with open(path) as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return []
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
     bets = data.get("bets", data if isinstance(data, list) else [])
     return [b for b in bets if isinstance(b, dict)]
 
@@ -68,13 +78,21 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 2
     posted: set = set(json.load(open(posted_path))) if os.path.exists(posted_path) else set()
     started = dt.datetime.now(dt.timezone.utc)
     log.info("kakalshi adapter running as %s, watching %s", client.agent_id, shadow_path)
+    waiting_logged = False
     while True:
         try:
             bets = load_bets(shadow_path)
-        except Exception as e:
+        except Exception as e:  # anything unexpected: log once per occurrence, keep going
             log.warning("could not read shadow log: %s", e)
             time.sleep(poll_seconds)
             continue
+        if not bets and not os.path.exists(shadow_path):
+            if not waiting_logged:
+                log.info("waiting for %s to appear (Kakalshi creates it on its first bet)", shadow_path)
+                waiting_logged = True
+            time.sleep(poll_seconds)
+            continue
+        waiting_logged = False
         for bet in bets:
             bid = f"{bet.get('id')}@{bet.get('timestamp', '')}"
             if bid in posted:
@@ -104,6 +122,8 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 2
                 else:
                     log.warning("bet %s: %s", bid, e)
                     posted.add(bid)
+            except Exception as e:  # network blip, server restart: retry next poll
+                log.warning("bet %s: post failed (%s), will retry", bid, type(e).__name__)
         with open(posted_path, "w") as f:
             json.dump(sorted(posted), f)
         time.sleep(poll_seconds)
