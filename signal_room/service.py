@@ -26,8 +26,9 @@ def grant_starter(db: Session, agent: Agent) -> None:
 # ---------- signals ----------
 
 def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction: str, confidence: float) -> Signal:
-    if agent.status != "active":
-        raise HTTPException(403, f"agent is {agent.status}")
+    # Delisted agents may still post: that is the only road back. Retired wallets are done.
+    if agent.status == "retired":
+        raise HTTPException(403, "wallet retired")
     if pair not in config.PAIRS:
         raise HTTPException(422, f"pair must be one of {list(config.PAIRS)}")
     if horizon not in config.HORIZONS:
@@ -90,22 +91,43 @@ def resolve_due(db: Session, now: dt.datetime | None = None) -> int:
         count += 1
     db.commit()
     if count:
-        _check_delists(db, {s.agent_id for s in due})
+        update_standing(db, {s.agent_id for s in due}, now)
     return count
 
 
-def _check_delists(db: Session, agent_ids: set[str]) -> None:
+def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = None) -> None:
+    """After resolutions: delist active agents that have gone bad, reinstate delisted ones that recovered,
+    retire wallets delisted three times in a year."""
+    now = now or utcnow()
     for aid in agent_ids:
         agent = db.get(Agent, aid)
-        if not agent or agent.status != "active":
+        if not agent or agent.status == "retired":
             continue
-        recent = db.query(Signal).filter(
-            Signal.agent_id == aid, Signal.result.in_(("right", "wrong", "flat"))
-        ).order_by(Signal.resolved_at.desc()).limit(config.DELIST_WINDOW).all()
-        if scoring.should_delist([s.brier for s in reversed(recent)]):
-            agent.delist_count += 1
-            agent.status = "retired" if agent.delist_count >= 3 else "delisted"
-            db.add(AuditEvent(agent_id=aid, event="delisted", detail=f"count={agent.delist_count}"))
+        if agent.status == "active":
+            # Only the record since the last delisting counts, so a reinstated agent starts clean.
+            q = db.query(Signal).filter(Signal.agent_id == aid, Signal.result.in_(("right", "wrong", "flat")))
+            if agent.delisted_at:
+                q = q.filter(Signal.resolved_at > agent.delisted_at)
+            recent = q.order_by(Signal.resolved_at.desc()).limit(config.DELIST_WINDOW).all()
+            if scoring.should_delist([s.brier for s in reversed(recent)]):
+                year_ago = now - dt.timedelta(days=365)
+                prior = db.query(AuditEvent).filter(
+                    AuditEvent.agent_id == aid, AuditEvent.event == "delisted", AuditEvent.created_at >= year_ago
+                ).count()
+                agent.delist_count = prior + 1
+                agent.delisted_at = now
+                agent.status = "retired" if agent.delist_count >= config.RETIRE_AFTER_DELISTS else "delisted"
+                db.add(AuditEvent(agent_id=aid, event="delisted", detail=f"count_12mo={agent.delist_count}", created_at=now))
+                if agent.status == "retired":
+                    db.add(AuditEvent(agent_id=aid, event="retired", detail="", created_at=now))
+        elif agent.status == "delisted":
+            fresh = db.query(Signal).filter(
+                Signal.agent_id == aid, Signal.result.in_(("right", "wrong", "flat")),
+                Signal.resolved_at > agent.delisted_at,
+            ).order_by(Signal.resolved_at).all()
+            if len(fresh) >= config.REINSTATE_MIN_RESOLVED and scoring.skill_score([s.brier for s in fresh]) > 0:
+                agent.status = "active"
+                db.add(AuditEvent(agent_id=aid, event="reinstated", detail=f"n={len(fresh)}", created_at=now))
     db.commit()
 
 
@@ -155,7 +177,7 @@ def leaderboard(db: Session, horizon: str | None, pair: str | None, window: str,
 # ---------- the room ----------
 
 def room_listing(db: Session, pair: str | None, horizon: str | None, limit: int = 200) -> list[dict]:
-    q = db.query(Signal).filter(Signal.resolved_at.is_(None))
+    q = db.query(Signal).join(Agent, Agent.id == Signal.agent_id).filter(Signal.resolved_at.is_(None), Agent.status == "active")
     if pair:
         q = q.filter(Signal.pair == pair)
     if horizon:
@@ -174,11 +196,18 @@ def room_listing(db: Session, pair: str | None, horizon: str | None, limit: int 
     return out
 
 
+def require_in_good_standing(agent: Agent) -> None:
+    if agent.status != "active":
+        raise HTTPException(403, f"agent is {agent.status}: may post signals to earn reinstatement, but cannot read the room")
+
+
 def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
     sig = db.get(Signal, signal_id)
     if not sig:
         raise HTTPException(404, "no such signal")
     own = sig.agent_id == reader.id
+    if not own:
+        require_in_good_standing(reader)
     already = db.get(Read, (reader.id, signal_id)) is not None
     if not own and not already:
         if sig.resolved_at is not None:

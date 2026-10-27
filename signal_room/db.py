@@ -32,6 +32,7 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(64), default="")
     status: Mapped[str] = mapped_column(String(16), default="active")  # active | delisted | retired
     delist_count: Mapped[int] = mapped_column(Integer, default=0)
+    delisted_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -161,7 +162,19 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def init_db(eng=None):
-    Base.metadata.create_all(eng or engine)
+    eng = eng or engine
+    Base.metadata.create_all(eng)
+    _migrate(eng)
+
+
+def _migrate(eng) -> None:
+    """Add columns introduced after the first release. create_all never alters existing tables."""
+    from sqlalchemy import inspect, text
+    insp = inspect(eng)
+    cols = {c["name"] for c in insp.get_columns("agents")}
+    with eng.begin() as conn:
+        if "delisted_at" not in cols:
+            conn.execute(text("ALTER TABLE agents ADD COLUMN delisted_at DATETIME"))
 
 
 def get_session():

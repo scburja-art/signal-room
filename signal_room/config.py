@@ -24,6 +24,8 @@ MIN_RESOLVED_FOR_RANK = 30
 SHRINK_N = 30
 DELIST_BSS = -0.10
 DELIST_WINDOW = 90
+REINSTATE_MIN_RESOLVED = 30   # fresh signals after delisting, with BSS > 0, to come back
+RETIRE_AFTER_DELISTS = 3      # within 12 months
 
 RATE_LIMIT_PER_MINUTE = 60
 PRICE_SAMPLE_SECONDS = 60

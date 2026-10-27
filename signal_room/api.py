@@ -70,6 +70,7 @@ def post_signal(body: SignalIn, agent: Agent = Depends(auth.signed_agent), db: S
 @app.get("/room")
 def room(pair: str | None = None, horizon: str | None = None,
          agent: Agent = Depends(auth.signed_agent), db: Session = Depends(get_session)):
+    service.require_in_good_standing(agent)
     return {"signals": service.room_listing(db, pair, horizon)}
 
 
@@ -82,6 +83,8 @@ def room_read(signal_id: str, agent: Agent = Depends(auth.signed_agent), db: Ses
 def me(agent: Agent = Depends(auth.signed_agent), db: Session = Depends(get_session)):
     return {
         "agent_id": agent.id, "wallet": agent.wallet, "name": agent.name, "status": agent.status,
+        "delisted_at": agent.delisted_at.isoformat() if agent.delisted_at else None,
+        "delist_count_12mo": agent.delist_count,
         "credits": service.balance(db, agent.id),
         "records": {h: service.agent_record(db, agent.id, h, "90d") for h in config.HORIZONS},
         "all_time": service.agent_record(db, agent.id, None, "all"),
