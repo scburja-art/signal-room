@@ -37,7 +37,7 @@ In a third, pointed at a running Kakalshi shadow log:
 ./start.sh agent kakalshi /path/to/shadow_results.json
 ```
 
-Each agent registers its own wallet on first run and stores the key in `agents/state/`.
+Each agent registers its own wallet on first run and stores the key in `agents/state/`. The Kakalshi adapter registers one agent per Kakalshi strategy (`kakalshi-crypto-first-minute`, `kakalshi-crypto-imbalance`, ...) so each strategy gets its own record.
 
 ## Logs
 

@@ -18,6 +18,11 @@ Timestamps in the shadow log are UTC (Kalshi's clock); the adapter compares in U
 Only bets whose timestamp is after the adapter started are posted, so an old log does not
 flood the room with stale signals. Posted bets are remembered by id + timestamp, because
 Kakalshi restarts bet numbering at 1 whenever it resets its shadow log.
+
+Each Kakalshi strategy gets its own Signal Room agent (own wallet, own record), so the room
+scores them separately. The strategy name comes from the bet's `strategy` field (falling back
+to `source`). Wallets are created on first sight and kept in the state directory as
+`kakalshi-<strategy>.json`.
 """
 from __future__ import annotations
 
@@ -72,12 +77,26 @@ def load_bets(path: str) -> list[dict]:
     return [b for b in bets if isinstance(b, dict)]
 
 
+def strategy_of(bet: dict) -> str:
+    name = str(bet.get("strategy") or bet.get("source") or "unknown")
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "unknown"
+
+
 def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 20) -> None:
-    client = SignalRoomClient.load_or_register(base_url, state_path, name="kakalshi-shadow")
+    state_dir = os.path.dirname(state_path) or "."
+    clients: dict[str, SignalRoomClient] = {}
+
+    def client_for(strategy: str) -> SignalRoomClient:
+        if strategy not in clients:
+            path = os.path.join(state_dir, f"kakalshi-{strategy}.json")
+            clients[strategy] = SignalRoomClient.load_or_register(base_url, path, name=f"kakalshi-{strategy}")
+            log.info("strategy %s -> agent %s", strategy, clients[strategy].agent_id)
+        return clients[strategy]
+
     posted_path = state_path + ".posted.json"
     posted: set = set(json.load(open(posted_path))) if os.path.exists(posted_path) else set()
     started = dt.datetime.now(dt.timezone.utc)
-    log.info("kakalshi adapter running as %s, watching %s", client.agent_id, shadow_path)
+    log.info("kakalshi adapter watching %s (one agent per strategy)", shadow_path)
     waiting_logged = False
     while True:
         try:
@@ -112,13 +131,14 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 2
                 posted.add(bid)
                 continue
             pair, horizon, direction, confidence = parsed
+            strategy = strategy_of(bet)
             try:
-                out = client.post_signal(pair, horizon, direction, confidence)
-                log.info("bet %s -> %s %s %s conf=%.2f id=%s", bid, pair, horizon, direction, confidence, out["signal_id"])
+                out = client_for(strategy).post_signal(pair, horizon, direction, confidence)
+                log.info("bet %s [%s] -> %s %s %s conf=%.2f id=%s", bid, strategy, pair, horizon, direction, confidence, out["signal_id"])
                 posted.add(bid)
             except SignalRoomError as e:
                 if e.status == 409:
-                    log.info("bet %s: open signal for %s %s already pending, will retry", bid, pair, horizon)
+                    log.info("bet %s [%s]: open signal for %s %s already pending, will retry", bid, strategy, pair, horizon)
                 else:
                     log.warning("bet %s: %s", bid, e)
                     posted.add(bid)

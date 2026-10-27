@@ -19,3 +19,4 @@ Goal: a local Signal Room on the user's Mac. API, database, price sampler, score
 - Kakalshi shadow records carry `confidence: 0`. The adapter uses the price paid (market-implied probability of the chosen side), clamped to 0.50–0.95, as the signal confidence. Tunable in the adapter.
 
 - Binance refuses US traffic (HTTP 451), confirmed on the first live run. Replaced with Bitstamp as the third feed. The spec said Binance; Bitstamp is US-reachable and keyless.
+- 2026-10-27: Kakalshi adapter registers one Signal Room agent per Kakalshi strategy, keyed on the bet's `strategy` field. The original single `kakalshi-shadow` agent stays in the database with zero signals; harmless.
