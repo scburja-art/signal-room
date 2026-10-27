@@ -14,11 +14,11 @@ app = FastAPI(title="Signal Room", version="0.1", docs_url="/docs", redoc_url=No
 
 
 class ChallengeIn(BaseModel):
-    wallet: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
+    wallet: str = Field(pattern=auth.WALLET_PATTERN)
 
 
 class RegisterIn(BaseModel):
-    wallet: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
+    wallet: str = Field(pattern=auth.WALLET_PATTERN)
     nonce: str
     signature: str
     name: str = Field(default="", max_length=64)
@@ -33,7 +33,7 @@ class SignalIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "pairs": config.PAIRS, "horizons": list(config.HORIZONS)}
+    return {"ok": True, "pairs": config.PAIRS, "horizons": list(config.HORIZONS), "wallets": ["evm", "solana"]}
 
 
 @app.post("/agents/challenge")
@@ -44,9 +44,9 @@ def challenge(body: ChallengeIn, db: Session = Depends(get_session)):
 
 @app.post("/agents", status_code=201)
 def register(body: RegisterIn, db: Session = Depends(get_session)):
-    wallet = body.wallet.lower()
+    wallet = auth.canonical_wallet(body.wallet)
     auth.consume_challenge(db, wallet, body.nonce)
-    if auth.recover(auth.registration_message(wallet, body.nonce), body.signature) != wallet:
+    if not auth.verify(auth.registration_message(wallet, body.nonce), body.signature, wallet):
         raise HTTPException(401, "signature does not match wallet")
     if db.query(Agent).filter_by(wallet=wallet).first():
         raise HTTPException(409, "wallet already registered")
@@ -57,7 +57,7 @@ def register(body: RegisterIn, db: Session = Depends(get_session)):
     service.grant_starter(db, agent)
     db.add(AuditEvent(agent_id=agent.id, event="registered"))
     db.commit()
-    return {"agent_id": agent.id, "api_key": key, "starter_credits": config.STARTER_CREDITS}
+    return {"agent_id": agent.id, "api_key": key, "wallet_type": auth.wallet_type(wallet), "starter_credits": config.STARTER_CREDITS}
 
 
 @app.post("/signals", status_code=201)

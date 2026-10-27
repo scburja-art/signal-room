@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 
-from . import auth, config, prices, service
+from . import anchor, auth, config, prices, service
 from .db import SessionLocal, utcnow
 
 log = logging.getLogger("signal_room.scheduler")
@@ -24,8 +24,14 @@ def tick() -> dict:
             out["prices"] = 0
         out["resolved"] = service.resolve_due(db)
         yesterday = (utcnow() - dt.timedelta(days=1)).date()
-        service.build_daily_log(db, yesterday)
+        ylog = service.build_daily_log(db, yesterday)
         service.build_daily_log(db, utcnow().date())
+        # Yesterday is closed, so its root is final: anchor it once. Today's root keeps changing.
+        if anchor.enabled() and not ylog.anchored_tx:
+            try:
+                out["anchored"] = anchor.anchor_day(db, ylog)
+            except Exception as e:
+                log.warning("anchor failed for %s: %s", yesterday, e)
         auth.purge_old(db)
     finally:
         db.close()

@@ -27,7 +27,7 @@ class Base(DeclarativeBase):
 class Agent(Base):
     __tablename__ = "agents"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    wallet: Mapped[str] = mapped_column(String(42), unique=True, index=True)
+    wallet: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(64), default="")
     status: Mapped[str] = mapped_column(String(16), default="active")  # active | delisted | retired
@@ -38,7 +38,7 @@ class Agent(Base):
 class RegistrationChallenge(Base):
     __tablename__ = "registration_challenges"
     nonce: Mapped[str] = mapped_column(String(64), primary_key=True)
-    wallet: Mapped[str] = mapped_column(String(42), index=True)
+    wallet: Mapped[str] = mapped_column(String(64), index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
 
 

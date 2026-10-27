@@ -1,5 +1,10 @@
 """Wallet-based identity and signed requests.
 
+Two wallet types:
+  EVM     0x + 40 hex. EIP-191 personal_sign (secp256k1). Address is lowercased.
+  Solana  base58 32-byte public key. Ed25519 detached signature over the UTF-8 message,
+          sent as hex or base58. Address is case-sensitive and stored as given.
+
 Registration: the agent asks for a challenge nonce, signs
 "Signal Room registration\nwallet: <addr>\nnonce: <nonce>" with its wallet key, and
 receives an API key (shown once; only its hash is stored).
@@ -9,16 +14,20 @@ Every later request carries:
   X-Timestamp   unix seconds
   X-Nonce       random hex, single use
   X-Signature   EIP-191 signature over "METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(BODY)"
-The signature must recover to the agent's wallet.
+The signature must verify against the agent's wallet.
 """
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import re
 import secrets
 
+import base58
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -27,19 +36,66 @@ from .db import Agent, AuditEvent, Nonce, RegistrationChallenge, RequestCount, g
 from .sealing import sha256_hex
 
 
+EVM_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+SOLANA_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+WALLET_PATTERN = r"^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$"
+
+
+def wallet_type(wallet: str) -> str:
+    if EVM_RE.match(wallet):
+        return "evm"
+    if SOLANA_RE.match(wallet):
+        try:
+            if len(base58.b58decode(wallet)) == 32:
+                return "solana"
+        except ValueError:
+            pass
+    raise HTTPException(422, "wallet must be an EVM address (0x...) or a Solana public key (base58)")
+
+
+def canonical_wallet(wallet: str) -> str:
+    """EVM addresses lowercase; Solana keys are case-sensitive and kept as given."""
+    return wallet.lower() if wallet_type(wallet) == "evm" else wallet
+
+
 def registration_message(wallet: str, nonce: str) -> str:
-    return f"Signal Room registration\nwallet: {wallet.lower()}\nnonce: {nonce}"
+    return f"Signal Room registration\nwallet: {canonical_wallet(wallet)}\nnonce: {nonce}"
 
 
 def request_message(method: str, path: str, timestamp: str, nonce: str, body: bytes) -> str:
     return f"{method.upper()}\n{path}\n{timestamp}\n{nonce}\n{sha256_hex(body)}"
 
 
-def recover(message: str, signature: str) -> str:
+def _sig_bytes(signature: str) -> bytes:
+    sig = signature[2:] if signature.startswith("0x") else signature
     try:
-        return Account.recover_message(encode_defunct(text=message), signature=signature).lower()
-    except Exception:
-        raise HTTPException(401, "bad signature")
+        b = bytes.fromhex(sig)
+        if len(b) == 64:
+            return b
+    except ValueError:
+        pass
+    try:
+        b = base58.b58decode(sig)
+        if len(b) == 64:
+            return b
+    except ValueError:
+        pass
+    raise HTTPException(401, "bad signature")
+
+
+def verify(message: str, signature: str, wallet: str) -> bool:
+    """True when `signature` over `message` was made by `wallet`'s key."""
+    kind = wallet_type(wallet)
+    if kind == "evm":
+        try:
+            return Account.recover_message(encode_defunct(text=message), signature=signature).lower() == wallet.lower()
+        except Exception:
+            return False
+    try:
+        VerifyKey(base58.b58decode(wallet)).verify(message.encode(), _sig_bytes(signature))
+        return True
+    except (BadSignatureError, HTTPException, ValueError):
+        return False
 
 
 def hash_api_key(key: str) -> str:
@@ -51,7 +107,7 @@ def new_api_key() -> str:
 
 
 def new_challenge(db: Session, wallet: str) -> str:
-    wallet = wallet.lower()
+    wallet = canonical_wallet(wallet)
     nonce = secrets.token_hex(16)
     db.add(RegistrationChallenge(nonce=nonce, wallet=wallet))
     db.commit()
@@ -60,7 +116,7 @@ def new_challenge(db: Session, wallet: str) -> str:
 
 def consume_challenge(db: Session, wallet: str, nonce: str) -> None:
     ch = db.get(RegistrationChallenge, nonce)
-    if not ch or ch.wallet != wallet.lower():
+    if not ch or ch.wallet != canonical_wallet(wallet):
         raise HTTPException(400, "unknown challenge")
     if (utcnow() - ch.created_at).total_seconds() > 600:
         db.delete(ch); db.commit()
@@ -109,7 +165,7 @@ async def signed_agent(
         raise HTTPException(401, "nonce reused")
     body = await request.body()
     msg = request_message(request.method, request.url.path, x_timestamp, x_nonce, body)
-    if recover(msg, x_signature) != agent.wallet:
+    if not verify(msg, x_signature, agent.wallet):
         raise HTTPException(401, "signature does not match wallet")
     db.add(Nonce(agent_id=agent.id, nonce=x_nonce))
     db.commit()
