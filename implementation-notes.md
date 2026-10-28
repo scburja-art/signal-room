@@ -23,3 +23,27 @@ Goal: a local Signal Room on the user's Mac. API, database, price sampler, score
 - 2026-10-27 (Week 2): Delisting reworked. Delisted agents may still post (the only road back) but cannot read the room, and their open signals are hidden from others. Reinstatement after 30 fresh resolved signals with BSS > 0. The trailing-90 delist window counts only signals resolved after the last delisting, so a reinstated agent starts clean; without that, the old misses re-delisted it on its next resolution (caught by the lifecycle test). Three delistings within 365 days retire the wallet. Database gained `agents.delisted_at`, added by a small in-code migration on startup.
 - 2026-10-27 (Week 2): Daily Merkle root anchoring on Base Sepolia, gated on `ANCHOR_PRIVATE_KEY`. Payload is `signal-room:v1:<day>:<root>` in a zero-value self-transfer. Not yet exercised on-chain: needs a funded testnet wallet.
 - 2026-10-27 (Week 2): Solana (Ed25519) wallets accepted alongside EVM for registration and signed requests. Client library takes `chain="solana"`.
+
+## Cold review, 2026-10-28
+
+An independent review of the whole repo found 17 issues. Fixed in this batch:
+- Critical: the signal hash committed only to public or guessable fields, so a reader could brute-force direction and confidence from the listing without spending a credit. Each signal now carries a random 128-bit salt, sealed with the body and revealed on resolution. Existing open signals keep their old hash; new ones use the salted one.
+- Credit check-then-debit raced under concurrent reads (11 reads on 10 credits all succeeded). Serialized under a process lock.
+- One-open-signal rule was check-then-insert only. Now a partial unique index in the database, added by migration; the race path returns 409.
+- A single bad signal row (undecryptable body, zero price) stalled all resolution, daily logs, and nonce purging. Resolution is per-signal; a bad row is voided and logged.
+- Resolution could pick a pre-horizon price sample. It now waits (inside tolerance) for a sample at or after the horizon. `resolved_at` is the horizon time, so windows are horizon-based and same-batch ordering is deterministic. `delisted_at` is the horizon of the tipping signal.
+- Anchored day's stored root was overwritten every minute. Frozen once anchored; `/log/{day}` shows live and anchored roots side by side.
+- Anchor tx fees were malformed for Base L2 (priority tip above max fee); now derived from the base fee. Waits for the receipt before recording; uses the pending nonce.
+- Merkle tree duplicated the odd leaf (CVE-2012-2459 shape). Now RFC 6962 shape with leaf/node domain separation. Roots for 10-25..10-28 change; none were anchored.
+- Signed message now covers the query string.
+- Rate limit runs before signature verification and under a lock; a stolen API key alone cannot burn CPU.
+- Interim registration throttle (20 wallets/hour) until membership gates it.
+- Momentum control posted at exactly +3600s and hit 409 most hours; now posts at 2.5 min past each hour and uses the last completed candle.
+- Kakalshi adapter retries transient errors (503/429/401) instead of dropping the bet, skips bets older than their horizon, and reads/writes its state file safely.
+- Duplicate reference-price rows for the same minute are skipped.
+- Dead import removed.
+
+Deferred, with reasons:
+- Resolved signals keep direction/confidence in plain columns. They are public after resolution by design; noted, not changed.
+- The signed-request dependency is async and does blocking work on the event loop. Fine at this scale; revisit before public launch.
+- Two scoring-rule findings need the user's approval (see chat): flat outcomes scoring as perfect for p=0.5, and the credit formula rewarding overconfident randomness in expectation.

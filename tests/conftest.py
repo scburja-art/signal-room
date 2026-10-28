@@ -16,8 +16,12 @@ from signal_room.db import Base, ReferencePrice, utcnow  # noqa: E402
 
 
 @pytest.fixture()
-def session_factory(monkeypatch):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+def session_factory(monkeypatch, request, tmp_path):
+    if request.node.get_closest_marker("filedb"):
+        # Real file with per-thread connections, for tests that need true concurrency.
+        engine = create_engine(f"sqlite:///{tmp_path}/t.db", connect_args={"check_same_thread": False, "timeout": 30})
+    else:
+        engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(dbmod, "engine", engine)
@@ -40,9 +44,11 @@ def session_factory(monkeypatch):
 
 
 @pytest.fixture()
-def client(session_factory):
-    from signal_room.api import app
-    return TestClient(app)
+def client(session_factory, monkeypatch):
+    from signal_room import api, config
+    monkeypatch.setattr(config, "REGISTRATIONS_PER_HOUR", 10_000)
+    api._reg_times.clear()
+    return TestClient(api.app)
 
 
 def set_price(factory, pair: str, price: float, when: dt.datetime | None = None):

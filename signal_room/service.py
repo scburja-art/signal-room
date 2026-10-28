@@ -2,14 +2,23 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import threading
 
 from fastapi import HTTPException
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import config, prices, scoring
 from .db import Agent, AuditEvent, CreditEntry, DailyLog, Read, Signal, utcnow
-from .sealing import merkle_root, seal, signal_hash, unseal
+from .sealing import merkle_root, new_salt, seal, signal_hash, unseal
+
+log = logging.getLogger("signal_room.service")
+
+# Serializes check-then-debit on credits. One process, so a process lock is enough; a second
+# process would need a row lock or a balance table with a CHECK constraint.
+_credit_lock = threading.Lock()
 
 
 # ---------- credits ----------
@@ -47,15 +56,20 @@ def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction:
         raise HTTPException(503, "no fresh reference price; try again in a minute")
 
     now = utcnow()
+    salt = new_salt()
     sig = Signal(
         agent_id=agent.id, pair=pair, horizon=horizon,
-        body_cipher=seal(agent.id, {"direction": direction, "confidence": confidence}),
-        hash=signal_hash(agent.id, pair, horizon, direction, confidence, now.isoformat(), ref.price),
+        body_cipher=seal(agent.id, {"direction": direction, "confidence": confidence, "salt": salt}),
+        hash=signal_hash(agent.id, pair, horizon, direction, confidence, now.isoformat(), ref.price, salt),
         submitted_at=now, resolve_at=now + dt.timedelta(seconds=config.HORIZONS[horizon]),
         price_at_submit=ref.price,
     )
     db.add(sig)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:  # lost a race with a concurrent post for the same pair/horizon
+        db.rollback()
+        raise HTTPException(409, "one open signal per pair per horizon")
     return sig
 
 
@@ -64,35 +78,61 @@ def resolve_due(db: Session, now: dt.datetime | None = None) -> int:
     now = now or utcnow()
     due = db.query(Signal).filter(Signal.resolved_at.is_(None), Signal.resolve_at <= now).all()
     count = 0
+    touched: set[str] = set()
     for sig in due:
-        ref = prices.nearest(db, sig.pair, sig.resolve_at, config.RESOLVE_TOLERANCE_SECONDS)
+        try:
+            if _resolve_one(db, sig, now):
+                count += 1
+                touched.add(sig.agent_id)
+        except Exception as e:  # one bad row must never stall resolution for everyone
+            db.rollback()
+            log.exception("resolve failed for signal %s: %s", sig.id, e)
+            try:
+                sig = db.get(Signal, sig.id)
+                sig.result, sig.resolved_at, sig.credit = "void", now, 0.0
+                db.add(AuditEvent(agent_id=sig.agent_id, event="signal_void", detail=f"{sig.id} error={type(e).__name__}"))
+                db.commit()
+                count += 1
+            except Exception:
+                db.rollback()
+    if touched:
+        update_standing(db, touched, now)
+    return count
+
+
+def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
+    """Score one due signal. Returns False when it is not ready yet (waiting for a price)."""
+    ref = prices.nearest(db, sig.pair, sig.resolve_at, config.RESOLVE_TOLERANCE_SECONDS)
+    still_waiting = (now - sig.resolve_at).total_seconds() <= config.RESOLVE_TOLERANCE_SECONDS
+    if ref is None or (still_waiting and ref.sampled_at < sig.resolve_at):
+        # Prefer a sample taken at or after the horizon. Inside the tolerance window, wait for one.
+        if still_waiting:
+            return False
         if ref is None:
-            # No price within tolerance. If we are still inside the tolerance window, wait; else void.
-            if (now - sig.resolve_at).total_seconds() <= config.RESOLVE_TOLERANCE_SECONDS:
-                continue
             body = unseal(sig.agent_id, sig.body_cipher)
             sig.direction, sig.confidence = body["direction"], body["confidence"]
             sig.result, sig.resolved_at, sig.credit = "void", now, 0.0
             db.add(AuditEvent(agent_id=sig.agent_id, event="signal_void", detail=sig.id))
-            count += 1
-            continue
-        body = unseal(sig.agent_id, sig.body_cipher)
-        direction, confidence = body["direction"], float(body["confidence"])
-        result, y = scoring.outcome(direction, sig.price_at_submit, ref.price)
-        bs = scoring.brier(confidence, y)
-        credit = scoring.credit_for(bs, result)
-        sig.direction, sig.confidence = direction, confidence
-        sig.price_at_resolve, sig.resolved_at = ref.price, now
-        sig.result, sig.brier = result, round(bs, 6)
-        sig.net_return = round(scoring.net_return(direction, sig.price_at_submit, ref.price), 6)
-        sig.credit = round(credit, 4)
-        if credit > 0:
-            db.add(CreditEntry(agent_id=sig.agent_id, amount=sig.credit, reason="resolved", signal_id=sig.id))
-        count += 1
+            db.commit()
+            return True
+    body = unseal(sig.agent_id, sig.body_cipher)
+    direction, confidence = body["direction"], float(body["confidence"])
+    if sig.price_at_submit <= 0:
+        raise ValueError("bad price_at_submit")
+    result, y = scoring.outcome(direction, sig.price_at_submit, ref.price)
+    bs = scoring.brier(confidence, y)
+    credit = scoring.credit_for(bs, result)
+    sig.direction, sig.confidence = direction, confidence
+    sig.price_at_resolve = ref.price
+    # resolved_at is the horizon itself, so windows are horizon-based and same-batch order is deterministic.
+    sig.resolved_at = sig.resolve_at
+    sig.result, sig.brier = result, round(bs, 6)
+    sig.net_return = round(scoring.net_return(direction, sig.price_at_submit, ref.price), 6)
+    sig.credit = round(credit, 4)
+    if credit > 0:
+        db.add(CreditEntry(agent_id=sig.agent_id, amount=sig.credit, reason="resolved", signal_id=sig.id))
     db.commit()
-    if count:
-        update_standing(db, {s.agent_id for s in due}, now)
-    return count
+    return True
 
 
 def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = None) -> None:
@@ -110,12 +150,9 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
                 q = q.filter(Signal.resolved_at > agent.delisted_at)
             recent = q.order_by(Signal.resolved_at.desc()).limit(config.DELIST_WINDOW).all()
             if scoring.should_delist([s.brier for s in reversed(recent)]):
-                year_ago = now - dt.timedelta(days=365)
-                prior = db.query(AuditEvent).filter(
-                    AuditEvent.agent_id == aid, AuditEvent.event == "delisted", AuditEvent.created_at >= year_ago
-                ).count()
-                agent.delist_count = prior + 1
-                agent.delisted_at = now
+                agent.delist_count = delists_last_year(db, aid, now) + 1
+                # As of the horizon of the signal that tipped it, so "fresh" means resolved after that signal.
+                agent.delisted_at = max(s.resolved_at for s in recent)
                 agent.status = "retired" if agent.delist_count >= config.RETIRE_AFTER_DELISTS else "delisted"
                 db.add(AuditEvent(agent_id=aid, event="delisted", detail=f"count_12mo={agent.delist_count}", created_at=now))
                 if agent.status == "retired":
@@ -196,6 +233,14 @@ def room_listing(db: Session, pair: str | None, horizon: str | None, limit: int 
     return out
 
 
+def delists_last_year(db: Session, agent_id: str, now: dt.datetime | None = None) -> int:
+    now = now or utcnow()
+    return db.query(AuditEvent).filter(
+        AuditEvent.agent_id == agent_id, AuditEvent.event == "delisted",
+        AuditEvent.created_at >= now - dt.timedelta(days=365),
+    ).count()
+
+
 def require_in_good_standing(agent: Agent) -> None:
     if agent.status != "active":
         raise HTTPException(403, f"agent is {agent.status}: may post signals to earn reinstatement, but cannot read the room")
@@ -208,18 +253,18 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
     own = sig.agent_id == reader.id
     if not own:
         require_in_good_standing(reader)
-    already = db.get(Read, (reader.id, signal_id)) is not None
-    if not own and not already:
-        if sig.resolved_at is not None:
-            pass  # resolved signals are public record; still logged, no charge
-        else:
-            bal = balance(db, reader.id)
-            if bal < config.READ_COST:
-                raise HTTPException(402, detail={"message": "insufficient credits", "balance": bal, "cost": config.READ_COST})
-            db.add(CreditEntry(agent_id=reader.id, amount=-config.READ_COST, reason="read", signal_id=sig.id))
-        db.add(Read(agent_id=reader.id, signal_id=sig.id))
-        db.add(AuditEvent(agent_id=reader.id, event="read", detail=sig.id))
-        db.commit()
+    if not own:
+        with _credit_lock:
+            already = db.get(Read, (reader.id, signal_id)) is not None
+            if not already:
+                if sig.resolved_at is None:  # open signals cost a credit; resolved ones are public record
+                    bal = balance(db, reader.id)
+                    if bal < config.READ_COST:
+                        raise HTTPException(402, detail={"message": "insufficient credits", "balance": bal, "cost": config.READ_COST})
+                    db.add(CreditEntry(agent_id=reader.id, amount=-config.READ_COST, reason="read", signal_id=sig.id))
+                db.add(Read(agent_id=reader.id, signal_id=sig.id))
+                db.add(AuditEvent(agent_id=reader.id, event="read", detail=sig.id))
+                db.commit()
     body = unseal(sig.agent_id, sig.body_cipher)
     return {
         "signal_id": sig.id, "agent_id": sig.agent_id, "pair": sig.pair, "horizon": sig.horizon,
@@ -256,6 +301,8 @@ def build_daily_log(db: Session, day: dt.date) -> DailyLog:
     if log is None:
         log = DailyLog(day=day.isoformat(), merkle_root=root, signal_count=len(rows))
         db.add(log)
+    elif log.anchored_tx:
+        pass  # once anchored, the stored root is frozen; /log/{day} shows live vs anchored side by side
     else:
         log.merkle_root, log.signal_count = root, len(rows)
     db.commit()

@@ -13,7 +13,8 @@ Every later request carries:
   X-Agent-Key   the API key
   X-Timestamp   unix seconds
   X-Nonce       random hex, single use
-  X-Signature   EIP-191 signature over "METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(BODY)"
+  X-Signature   signature over "METHOD\nPATH?QUERY\nTIMESTAMP\nNONCE\nSHA256(BODY)"
+                (PATH?QUERY is the path plus the raw query string when there is one)
 The signature must verify against the agent's wallet.
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ import datetime as dt
 import hashlib
 import re
 import secrets
+import threading
 
 import base58
 from eth_account import Account
@@ -62,8 +64,9 @@ def registration_message(wallet: str, nonce: str) -> str:
     return f"Signal Room registration\nwallet: {canonical_wallet(wallet)}\nnonce: {nonce}"
 
 
-def request_message(method: str, path: str, timestamp: str, nonce: str, body: bytes) -> str:
-    return f"{method.upper()}\n{path}\n{timestamp}\n{nonce}\n{sha256_hex(body)}"
+def request_message(method: str, path: str, timestamp: str, nonce: str, body: bytes, query: str = "") -> str:
+    target = f"{path}?{query}" if query else path
+    return f"{method.upper()}\n{target}\n{timestamp}\n{nonce}\n{sha256_hex(body)}"
 
 
 def _sig_bytes(signature: str) -> bytes:
@@ -125,15 +128,20 @@ def consume_challenge(db: Session, wallet: str, nonce: str) -> None:
     db.commit()
 
 
+_rate_lock = threading.Lock()
+
+
 def _rate_limit(db: Session, agent_id: str) -> None:
     minute = utcnow().strftime("%Y%m%d%H%M")
-    row = db.get(RequestCount, (agent_id, minute))
-    if row is None:
-        row = RequestCount(agent_id=agent_id, minute=minute, count=0)
-        db.add(row)
-    row.count += 1
-    db.commit()
-    if row.count > config.RATE_LIMIT_PER_MINUTE:
+    with _rate_lock:
+        row = db.get(RequestCount, (agent_id, minute))
+        if row is None:
+            row = RequestCount(agent_id=agent_id, minute=minute, count=0)
+            db.add(row)
+        row.count += 1
+        db.commit()
+        count = row.count
+    if count > config.RATE_LIMIT_PER_MINUTE:
         raise HTTPException(429, "rate limit")
 
 
@@ -148,6 +156,7 @@ async def signed_agent(
     agent = db.query(Agent).filter_by(api_key_hash=hash_api_key(x_agent_key)).first()
     if not agent:
         raise HTTPException(401, "unknown key")
+    _rate_limit(db, agent.id)  # before any signature work, so a stolen key alone cannot burn CPU
     if agent.status == "retired":
         raise HTTPException(403, "wallet retired")
     try:
@@ -164,12 +173,11 @@ async def signed_agent(
         db.commit()
         raise HTTPException(401, "nonce reused")
     body = await request.body()
-    msg = request_message(request.method, request.url.path, x_timestamp, x_nonce, body)
+    msg = request_message(request.method, request.url.path, x_timestamp, x_nonce, body, request.url.query)
     if not verify(msg, x_signature, agent.wallet):
         raise HTTPException(401, "signature does not match wallet")
     db.add(Nonce(agent_id=agent.id, nonce=x_nonce))
     db.commit()
-    _rate_limit(db, agent.id)
     return agent
 
 

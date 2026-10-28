@@ -16,8 +16,12 @@ those are posted at the floor of 0.50 (a 50/50 call) rather than dropped, so the
 Timestamps in the shadow log are UTC (Kalshi's clock); the adapter compares in UTC.
 
 Only bets whose timestamp is after the adapter started are posted, so an old log does not
-flood the room with stale signals. Posted bets are remembered by id + timestamp, because
-Kakalshi restarts bet numbering at 1 whenever it resets its shadow log.
+flood the room with stale signals. A bet older than its own horizon when first seen is skipped
+too: posting it would stamp a stale call as fresh. Posted bets are remembered by id + timestamp,
+because Kakalshi restarts bet numbering at 1 whenever it resets its shadow log.
+
+Transient errors (no fresh price yet, rate limit, server restart) are retried on the next poll.
+Permanent rejections (validation) are recorded and skipped.
 
 Each Kakalshi strategy gets its own Signal Room agent (own wallet, own record), so the room
 scores them separately. The strategy name comes from the bet's `strategy` field (falling back
@@ -41,6 +45,23 @@ SERIES_PAIR = {"KXBTC": "BTC", "KXETH": "ETH", "KXSOL": "SOL", "KXXRP": "XRP"}
 SERIES_HORIZON = {"15M": "15m", "": "1h"}  # KXBTC15M -> 15m; plain KXBTC hourly -> 1h
 TICKER_RE = re.compile(r"^(KX(?:BTC|ETH|SOL|XRP))(15M)?-")
 CONF_MIN, CONF_MAX = 0.50, 0.95
+HORIZON_SECONDS = {"15m": 15 * 60, "1h": 60 * 60}
+TRANSIENT_STATUSES = {401, 429, 503}  # clock skew, rate limit, no fresh price: try again next poll
+
+
+def load_posted(path: str) -> set:
+    try:
+        with open(path) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return set()
+
+
+def save_posted(path: str, posted: set) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(sorted(posted), f)
+    os.replace(tmp, path)
 
 
 def parse_bet(bet: dict) -> tuple[str, str, str, float] | None:
@@ -94,7 +115,7 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 2
         return clients[strategy]
 
     posted_path = state_path + ".posted.json"
-    posted: set = set(json.load(open(posted_path))) if os.path.exists(posted_path) else set()
+    posted: set = load_posted(posted_path)
     started = dt.datetime.now(dt.timezone.utc)
     log.info("kakalshi adapter watching %s (one agent per strategy)", shadow_path)
     waiting_logged = False
@@ -131,6 +152,11 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 2
                 posted.add(bid)
                 continue
             pair, horizon, direction, confidence = parsed
+            age = (dt.datetime.now(dt.timezone.utc) - ts).total_seconds()
+            if age > HORIZON_SECONDS.get(horizon, 900):
+                log.info("bet %s: %.0fs old, past its %s horizon, skipping", bid, age, horizon)
+                posted.add(bid)
+                continue
             strategy = strategy_of(bet)
             try:
                 out = client_for(strategy).post_signal(pair, horizon, direction, confidence)
@@ -139,11 +165,12 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 2
             except SignalRoomError as e:
                 if e.status == 409:
                     log.info("bet %s [%s]: open signal for %s %s already pending, will retry", bid, strategy, pair, horizon)
+                elif e.status in TRANSIENT_STATUSES:
+                    log.info("bet %s: %s, will retry", bid, e)
                 else:
-                    log.warning("bet %s: %s", bid, e)
+                    log.warning("bet %s: rejected: %s", bid, e)
                     posted.add(bid)
             except Exception as e:  # network blip, server restart: retry next poll
                 log.warning("bet %s: post failed (%s), will retry", bid, type(e).__name__)
-        with open(posted_path, "w") as f:
-            json.dump(sorted(posted), f)
+        save_posted(posted_path, posted)
         time.sleep(poll_seconds)

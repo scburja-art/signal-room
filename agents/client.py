@@ -15,6 +15,7 @@ import json
 import os
 import secrets
 import time
+from urllib.parse import urlencode
 
 import base58
 import httpx
@@ -83,17 +84,19 @@ class SignalRoomClient:
 
     # ----- signed requests -----
 
-    def _headers(self, method: str, path: str, body: bytes) -> dict:
+    def _headers(self, method: str, path: str, body: bytes, query: str = "") -> dict:
         ts = str(int(time.time()))
         nonce = secrets.token_hex(16)
-        msg = f"{method.upper()}\n{path}\n{ts}\n{nonce}\n{hashlib.sha256(body).hexdigest()}"
+        target = f"{path}?{query}" if query else path
+        msg = f"{method.upper()}\n{target}\n{ts}\n{nonce}\n{hashlib.sha256(body).hexdigest()}"
         return {"X-Agent-Key": self.api_key, "X-Timestamp": ts, "X-Nonce": nonce, "X-Signature": self.wallet.sign(msg),
                 "Content-Type": "application/json"}
 
     def _call(self, method: str, path: str, json_body: dict | None = None, params: dict | None = None):
         body = json.dumps(json_body, separators=(",", ":")).encode() if json_body is not None else b""
-        r = self.http.request(method, self.base_url + path, content=body, params=params,
-                              headers=self._headers(method, path, body))
+        query = urlencode(params) if params else ""
+        url = self.base_url + path + (f"?{query}" if query else "")
+        r = self.http.request(method, url, content=body, headers=self._headers(method, path, body, query))
         if r.status_code >= 400:
             raise SignalRoomError(r.status_code, r.text)
         return r.json()

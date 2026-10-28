@@ -58,6 +58,8 @@ def sample_all(db: Session, client: httpx.Client | None = None, now: dt.datetime
     medians: dict[str, float] = {}
     try:
         for pair in config.PAIRS:
+            if db.query(ReferencePrice.id).filter_by(pair=pair, sampled_at=now).first():
+                continue  # already sampled this minute
             prices = []
             for feed, fn in FEEDS.items():
                 try:

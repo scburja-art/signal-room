@@ -46,21 +46,30 @@ def anchor_day(db: Session, day_log: DailyLog) -> str | None:
 
     w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 20}))
     acct = w3.eth.account.from_key(PRIVATE_KEY)
+    base_fee = w3.eth.get_block("latest").get("baseFeePerGas", w3.eth.gas_price)
+    # L2 base fees can be far below 1 gwei; the priority tip must never exceed the max fee.
+    priority = min(w3.to_wei(0.01, "gwei"), max(1, base_fee // 10))
+    max_fee = base_fee * 2 + priority
     tx = {
         "from": acct.address,
         "to": acct.address,
         "value": 0,
         "data": payload(day_log.day, day_log.merkle_root),
-        "nonce": w3.eth.get_transaction_count(acct.address),
+        "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
         "chainId": CHAIN_ID,
+        "maxFeePerGas": int(max_fee),
+        "maxPriorityFeePerGas": int(priority),
     }
-    tx["gas"] = w3.eth.estimate_gas(tx)
-    tx["maxFeePerGas"] = w3.eth.gas_price * 2
-    tx["maxPriorityFeePerGas"] = w3.to_wei(1, "gwei")
+    tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.2)
     signed = acct.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+    raw_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    tx_hash = raw_hash.hex() if hasattr(raw_hash, "hex") else str(raw_hash)
     if not tx_hash.startswith("0x"):
         tx_hash = "0x" + tx_hash
+    # Only record the anchor once it is mined; a dropped tx is retried next tick.
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
+    if receipt.get("status") != 1:
+        raise RuntimeError(f"anchor tx {tx_hash} failed on-chain")
     day_log.anchored_tx = tx_hash
     db.add(AuditEvent(event="anchored", detail=f"{day_log.day} {tx_hash}"))
     db.commit()

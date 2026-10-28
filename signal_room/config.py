@@ -28,4 +28,5 @@ REINSTATE_MIN_RESOLVED = 30   # fresh signals after delisting, with BSS > 0, to 
 RETIRE_AFTER_DELISTS = 3      # within 12 months
 
 RATE_LIMIT_PER_MINUTE = 60
+REGISTRATIONS_PER_HOUR = 20   # interim brake on free starter credits until membership gates registration
 PRICE_SAMPLE_SECONDS = 60

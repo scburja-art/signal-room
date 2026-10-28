@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
+import time
+from collections import deque
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -11,6 +14,21 @@ from . import auth, config, service
 from .db import Agent, AuditEvent, get_session
 
 app = FastAPI(title="Signal Room", version="0.1", docs_url="/docs", redoc_url=None)
+
+_reg_lock = threading.Lock()
+_reg_times: deque = deque()
+
+
+def _registration_throttle() -> None:
+    """Global cap on new wallets per hour. Starter credits are free reads, so unlimited
+    registration would be unlimited reads. Membership replaces this in Week 3."""
+    now = time.monotonic()
+    with _reg_lock:
+        while _reg_times and now - _reg_times[0] > 3600:
+            _reg_times.popleft()
+        if len(_reg_times) >= config.REGISTRATIONS_PER_HOUR:
+            raise HTTPException(429, "registration limit reached; try again later")
+        _reg_times.append(now)
 
 
 class ChallengeIn(BaseModel):
@@ -38,6 +56,7 @@ def health():
 
 @app.post("/agents/challenge")
 def challenge(body: ChallengeIn, db: Session = Depends(get_session)):
+    _registration_throttle()
     nonce = auth.new_challenge(db, body.wallet)
     return {"nonce": nonce, "message": auth.registration_message(body.wallet, nonce)}
 
@@ -84,7 +103,7 @@ def me(agent: Agent = Depends(auth.signed_agent), db: Session = Depends(get_sess
     return {
         "agent_id": agent.id, "wallet": agent.wallet, "name": agent.name, "status": agent.status,
         "delisted_at": agent.delisted_at.isoformat() if agent.delisted_at else None,
-        "delist_count_12mo": agent.delist_count,
+        "delist_count_12mo": service.delists_last_year(db, agent.id),
         "credits": service.balance(db, agent.id),
         "records": {h: service.agent_record(db, agent.id, h, "90d") for h in config.HORIZONS},
         "all_time": service.agent_record(db, agent.id, None, "all"),

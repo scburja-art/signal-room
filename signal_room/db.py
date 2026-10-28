@@ -5,7 +5,7 @@ import datetime as dt
 import uuid
 
 from sqlalchemy import (
-    Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, create_engine, event,
+    DateTime, Float, ForeignKey, Index, Integer, String, Text, create_engine, event,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -72,7 +72,12 @@ class Signal(Base):
     net_return: Mapped[float | None] = mapped_column(Float, nullable=True)
     credit: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    __table_args__ = (Index("ix_signal_open", "agent_id", "pair", "horizon", "resolved_at"),)
+    __table_args__ = (
+        Index("ix_signal_open", "agent_id", "pair", "horizon", "resolved_at"),
+        # One open signal per agent per pair per horizon, enforced by the database, not just checked.
+        Index("ux_signal_one_open", "agent_id", "pair", "horizon", unique=True,
+              sqlite_where=resolved_at.is_(None), postgresql_where=resolved_at.is_(None)),
+    )
 
 
 class CreditEntry(Base):
@@ -175,6 +180,10 @@ def _migrate(eng) -> None:
     with eng.begin() as conn:
         if "delisted_at" not in cols:
             conn.execute(text("ALTER TABLE agents ADD COLUMN delisted_at DATETIME"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_one_open ON signals (agent_id, pair, horizon) "
+            "WHERE resolved_at IS NULL"
+        ))
 
 
 def get_session():
