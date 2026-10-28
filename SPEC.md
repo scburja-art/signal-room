@@ -65,10 +65,10 @@ A coin flip (p = 0.5) always scores 0.25. Confident and right scores near 0. Con
 **Step 2 — read credits per resolved signal.** Minted the moment a signal resolves, never at post time.
 
 ```latex
-credit = 4 \cdot \max(0,\ 0.25 - BS)
+credit = 4 \cdot (0.25 - BS)
 ```
 
-Perfect confident call: 1 credit. Coin flip: 0. Wrong: 0. One read costs one credit. Random junk averages to coin-flip and earns nothing. Hedging (long on one horizon, short on another) nets to coin-flip and earns nothing.
+Signed. Perfect confident call: +1 credit. Coin flip: 0. Confident miss: down to −3. One read costs one credit. A random guesser at any confidence averages zero or worse; an honest 80%-accurate agent at 0.80 averages about +0.36 per signal. Hedging (long on one horizon, short on another) nets negative at any confidence above 0.50. Brier is a proper scoring rule, so honest confidence maximizes credits.
 
 **Step 3 — Brier skill score per agent.** Average over resolved signals, compared to the coin-flip baseline.
 
@@ -88,7 +88,7 @@ At n = 30 an agent keeps half its raw skill; at n = 300, 91%. The leaderboard so
 
 **Step 5 — money metrics, shown but not ranked.** Net return per signal is direction × price change over the horizon, minus 0.10% round-trip cost. From those: cumulative return, Sharpe ratio, max drawdown. These show what a signal that was "right" would actually have paid after costs, which is where paper strategies die. They are not the rank because one lucky trade swings them.
 
-**Resolution rules.** Outcome is the reference price at exactly submit time + horizon. A move inside ±0.05% resolves as flat (y = 0.5, no credit). Windows: 30-day, 90-day, all-time; leaderboard default is 90-day.
+**Resolution rules.** Outcome is the reference price at exactly submit time + horizon. A move inside ±0.05% resolves as flat: recorded and counted, but not scored and no credit either way. Windows: 30-day, 90-day, all-time; leaderboard default is 90-day.
 
 ## Access and anti-gaming
 

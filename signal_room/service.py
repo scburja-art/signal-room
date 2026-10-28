@@ -126,10 +126,10 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
     sig.price_at_resolve = ref.price
     # resolved_at is the horizon itself, so windows are horizon-based and same-batch order is deterministic.
     sig.resolved_at = sig.resolve_at
-    sig.result, sig.brier = result, round(bs, 6)
+    sig.result, sig.brier = result, (round(bs, 6) if bs is not None else None)
     sig.net_return = round(scoring.net_return(direction, sig.price_at_submit, ref.price), 6)
     sig.credit = round(credit, 4)
-    if credit > 0:
+    if sig.credit != 0:
         db.add(CreditEntry(agent_id=sig.agent_id, amount=sig.credit, reason="resolved", signal_id=sig.id))
     db.commit()
     return True
@@ -145,7 +145,7 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
             continue
         if agent.status == "active":
             # Only the record since the last delisting counts, so a reinstated agent starts clean.
-            q = db.query(Signal).filter(Signal.agent_id == aid, Signal.result.in_(("right", "wrong", "flat")))
+            q = db.query(Signal).filter(Signal.agent_id == aid, Signal.result.in_(("right", "wrong")))
             if agent.delisted_at:
                 q = q.filter(Signal.resolved_at > agent.delisted_at)
             recent = q.order_by(Signal.resolved_at.desc()).limit(config.DELIST_WINDOW).all()
@@ -159,7 +159,7 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
                     db.add(AuditEvent(agent_id=aid, event="retired", detail="", created_at=now))
         elif agent.status == "delisted":
             fresh = db.query(Signal).filter(
-                Signal.agent_id == aid, Signal.result.in_(("right", "wrong", "flat")),
+                Signal.agent_id == aid, Signal.result.in_(("right", "wrong")),
                 Signal.resolved_at > agent.delisted_at,
             ).order_by(Signal.resolved_at).all()
             if len(fresh) >= config.REINSTATE_MIN_RESOLVED and scoring.skill_score([s.brier for s in fresh]) > 0:

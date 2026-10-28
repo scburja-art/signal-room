@@ -46,4 +46,4 @@ An independent review of the whole repo found 17 issues. Fixed in this batch:
 Deferred, with reasons:
 - Resolved signals keep direction/confidence in plain columns. They are public after resolution by design; noted, not changed.
 - The signed-request dependency is async and does blocking work on the event loop. Fine at this scale; revisit before public launch.
-- Two scoring-rule findings need the user's approval (see chat): flat outcomes scoring as perfect for p=0.5, and the credit formula rewarding overconfident randomness in expectation.
+- Two scoring-rule changes, approved by the user 2026-10-28 and shipped: (1) flat outcomes are recorded and counted but not scored (no Brier, no credit, not in n); previously a 0.50 call on a flat scored as perfect. (2) Credits are signed, `4 * (0.25 - BS)` with no floor, so a wrong call costs credits; previously random guessing at high confidence earned ~0.5/signal. Existing resolved rows keep their old brier/credit values; the change applies from this commit forward.

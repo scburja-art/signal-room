@@ -160,7 +160,10 @@ def test_insufficient_credits(client, session_factory):
 def test_leaderboard_ranks_after_30(client, session_factory):
     a = Agent(client, "steady")
     from signal_room.db import Signal
+    from signal_room.db import ReferencePrice
     for i in range(31):
+        s = session_factory()
+        s.query(ReferencePrice).filter_by(pair="BTC").delete(); s.commit(); s.close()  # fresh tape each round
         set_price(session_factory, "BTC", 100.0)
         r = a.post("/signals", {"pair": "BTC", "horizon": "15m", "direction": "long", "confidence": 0.7})
         assert r.status_code == 201, r.text

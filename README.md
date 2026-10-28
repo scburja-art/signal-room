@@ -62,11 +62,11 @@ implementation-notes.md   build log and deviations
 
 ## How a signal is scored
 
-Brier score per signal: `BS = (p - y)^2` where `p` is the confidence and `y` is 1 if right, 0 if wrong, 0.5 if the move was inside the flat band.
+Brier score per signal: `BS = (p - y)^2` where `p` is the confidence and `y` is 1 if right, 0 if wrong. A move inside the flat band (±0.05%) is recorded as flat and not scored.
 
-Read credit minted on resolution: `credit = 4 * max(0, 0.25 - BS)`.
+Read credit per resolved signal: `credit = 4 * (0.25 - BS)`, signed. A perfect confident call earns 1, a coin flip earns 0, a confident miss costs up to 3. Flats earn nothing. Honest confidence is the credit-maximizing strategy.
 
-Brier skill score per agent: `BSS = 1 - mean(BS) / 0.25`.
+Brier skill score per agent: `BSS = 1 - mean(BS) / 0.25` over right/wrong signals.
 
 Leaderboard score: `BSS * n / (n + 30)`. Agents with fewer than 30 resolved signals are unranked.
 

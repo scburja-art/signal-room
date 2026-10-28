@@ -17,16 +17,40 @@ def test_outcome_direction_and_flat_band():
     assert scoring.outcome("long", 100.0, 99.0) == ("wrong", 0.0)
     assert scoring.outcome("short", 100.0, 99.0) == ("right", 1.0)
     assert scoring.outcome("short", 100.0, 101.0) == ("wrong", 0.0)
-    assert scoring.outcome("long", 100.0, 100.02) == ("flat", 0.5)   # +0.02%, inside ±0.05%
+    assert scoring.outcome("long", 100.0, 100.02) == ("flat", None)  # +0.02%, inside ±0.05%: not scored
     assert scoring.outcome("long", 100.0, 100.06) == ("right", 1.0)  # +0.06%, outside
 
 
 def test_credit_hand_values():
-    assert scoring.credit_for(scoring.brier(1.0, 1.0), "right") == pytest.approx(1.0)   # perfect call = 1 credit
-    assert scoring.credit_for(scoring.brier(0.5, 1.0), "right") == pytest.approx(0.0)   # coin flip = 0
-    assert scoring.credit_for(scoring.brier(0.8, 0.0), "wrong") == pytest.approx(0.0)   # wrong = 0
-    assert scoring.credit_for(scoring.brier(0.8, 1.0), "right") == pytest.approx(0.84)  # 4 * (0.25 - 0.04)
-    assert scoring.credit_for(scoring.brier(0.6, 0.5), "flat") == pytest.approx(0.0)    # flat = 0
+    assert scoring.credit_for(scoring.brier(1.0, 1.0), "right") == pytest.approx(1.0)    # perfect call = +1
+    assert scoring.credit_for(scoring.brier(0.5, 1.0), "right") == pytest.approx(0.0)    # coin flip = 0
+    assert scoring.credit_for(scoring.brier(0.5, 0.0), "wrong") == pytest.approx(0.0)    # coin flip = 0 either way
+    assert scoring.credit_for(scoring.brier(0.8, 1.0), "right") == pytest.approx(0.84)   # 4 * (0.25 - 0.04)
+    assert scoring.credit_for(scoring.brier(0.8, 0.0), "wrong") == pytest.approx(-1.56)  # 4 * (0.25 - 0.64)
+    assert scoring.credit_for(scoring.brier(1.0, 0.0), "wrong") == pytest.approx(-3.0)   # max loss
+    assert scoring.credit_for(scoring.brier(0.6, None), "flat") == pytest.approx(0.0)    # flat = 0
+
+
+def test_random_guessing_does_not_pay_and_honesty_does():
+    """Expected credit per signal: random at p=1.0 → -1; coin flip → 0; honest 80% at 0.8 → +0.36."""
+    def expected(p, accuracy):
+        win = scoring.credit_for(scoring.brier(p, 1.0), "right")
+        loss = scoring.credit_for(scoring.brier(p, 0.0), "wrong")
+        return accuracy * win + (1 - accuracy) * loss
+    assert expected(1.0, 0.5) == pytest.approx(-1.0)
+    assert expected(0.5, 0.5) == pytest.approx(0.0)
+    assert expected(0.8, 0.8) == pytest.approx(0.36)
+    # proper scoring: for a true 80% skill, p=0.8 beats both over- and under-confidence
+    assert expected(0.8, 0.8) > expected(0.95, 0.8) and expected(0.8, 0.8) > expected(0.6, 0.8)
+
+
+def test_flats_do_not_inflate_skill():
+    """A coin-flipper on a quiet market used to look 'strong'; flats are now simply not scored."""
+    briers = [scoring.brier(0.5, 1.0 if i % 2 else 0.0) for i in range(80)] + [None] * 20
+    results = ["right" if i % 2 else "wrong" for i in range(80)] + ["flat"] * 20
+    rec = scoring.record(briers, results, [0.0] * 100)
+    assert rec.n == 80 and rec.flats == 20
+    assert rec.bss == pytest.approx(0.0)
 
 
 def test_skill_score_and_shrink():
@@ -53,13 +77,12 @@ def test_random_agent_scores_near_zero():
     assert abs(scoring.skill_score(briers) - (-0.01)) < 0.03
 
 
-def test_hedging_nets_to_nothing():
-    """Long and short on the same move: one right, one wrong, credits sum to zero at coin-flip confidence."""
+def test_hedging_loses():
+    """Long and short on the same move: zero at coin-flip confidence, negative at any confidence above it."""
     r1, y1 = scoring.outcome("long", 100.0, 102.0)
     r2, y2 = scoring.outcome("short", 100.0, 102.0)
-    c = scoring.credit_for(scoring.brier(0.5, y1), r1) + scoring.credit_for(scoring.brier(0.5, y2), r2)
-    assert c == pytest.approx(0.0)
-    # At 0.8 confidence the hedge earns 0.84 on the right leg and 0 on the wrong, but BSS over both is negative
+    assert scoring.credit_for(scoring.brier(0.5, y1), r1) + scoring.credit_for(scoring.brier(0.5, y2), r2) == pytest.approx(0.0)
+    assert scoring.credit_for(scoring.brier(0.8, y1), r1) + scoring.credit_for(scoring.brier(0.8, y2), r2) == pytest.approx(-0.72)
     assert scoring.skill_score([scoring.brier(0.8, y1), scoring.brier(0.8, y2)]) < 0
 
 
