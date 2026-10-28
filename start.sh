@@ -5,7 +5,12 @@ cd "$(dirname "$0")"
 if [ ! -d venv ]; then
   python3 -m venv venv
   ./venv/bin/pip install -q --upgrade pip
+fi
+
+# Install anything new in requirements.txt. Cheap when nothing changed.
+if [ ! -f venv/.requirements.sha ] || ! shasum -a 256 -c --status venv/.requirements.sha 2>/dev/null; then
   ./venv/bin/pip install -q -r requirements.txt
+  shasum -a 256 requirements.txt > venv/.requirements.sha
 fi
 
 if [ ! -f .env ]; then
