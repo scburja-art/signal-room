@@ -221,3 +221,15 @@ def test_momentum_slot_timing():
     hour = 1_700_000_000 - (1_700_000_000 % 3600)
     assert seconds_until_next_slot(hour + 10) == pytest.approx(3600 - 10 + POST_OFFSET_SECONDS)
     assert seconds_until_next_slot(hour + 3599) == pytest.approx(1 + POST_OFFSET_SECONDS)
+
+
+def test_mean_reversion_is_momentum_mirrored(monkeypatch):
+    from agents import mean_reversion_control as mr, momentum_control as mo
+    posted = {}
+    class C:
+        def post_signal(self, pair, horizon, direction, conf):
+            posted.setdefault(pair, []).append(direction); return {"signal_id": "x", "price_at_submit": 1.0}
+    monkeypatch.setattr(mo, "last_hour_return", lambda http, pair: 0.01 if pair in ("BTC", "ETH") else -0.01)
+    monkeypatch.setattr(mr, "last_hour_return", mo.last_hour_return)
+    mo.run_once(C(), None); mr.run_once(C(), None)
+    assert posted == {"BTC": ["long", "short"], "ETH": ["long", "short"], "SOL": ["short", "long"], "XRP": ["short", "long"]}

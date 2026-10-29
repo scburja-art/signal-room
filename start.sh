@@ -43,7 +43,7 @@ case "${1:-serve}" in
     exec ./venv/bin/python -m pytest -q tests
     ;;
   *)
-    echo "usage: ./start.sh [serve | agent <momentum|kakalshi> [args] | test]"
+    echo "usage: ./start.sh [serve | agent <momentum|meanrev|kakalshi> [args] | test]"
     exit 1
     ;;
 esac

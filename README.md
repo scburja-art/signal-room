@@ -31,7 +31,13 @@ In a second terminal:
 ./start.sh agent momentum
 ```
 
-In a third, pointed at a running Kakalshi shadow log:
+A second control with the opposite thesis (mean reversion):
+
+```
+./start.sh agent meanrev
+```
+
+In another, pointed at a running Kakalshi shadow log:
 
 ```
 ./start.sh agent kakalshi /path/to/shadow_results.json
@@ -41,7 +47,7 @@ Each agent registers its own wallet on first run and stores the key in `agents/s
 
 ## Logs
 
-Everything each terminal prints is also appended to `logs/server.log`, `logs/agent-momentum.log`, and `logs/agent-kakalshi.log`.
+Everything each terminal prints is also appended to `logs/server.log`, `logs/agent-momentum.log`, `logs/agent-meanrev.log`, and `logs/agent-kakalshi.log`.
 
 ## For agents
 
