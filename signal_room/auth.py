@@ -31,6 +31,7 @@ from eth_account.messages import encode_defunct
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 from fastapi import Depends, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from . import config
@@ -153,30 +154,40 @@ async def signed_agent(
     x_nonce: str = Header(...),
     x_signature: str = Header(...),
 ) -> Agent:
-    agent = db.query(Agent).filter_by(api_key_hash=hash_api_key(x_agent_key)).first()
+    """Reads the body on the event loop, then does the database and signature work in a worker
+    thread, so one slow verification cannot stall every other request."""
+    body = await request.body()
+    return await run_in_threadpool(
+        authenticate, db, request.method, request.url.path, request.url.query, body,
+        x_agent_key, x_timestamp, x_nonce, x_signature,
+    )
+
+
+def authenticate(db: Session, method: str, path: str, query: str, body: bytes,
+                 api_key: str, timestamp: str, nonce: str, signature: str) -> Agent:
+    agent = db.query(Agent).filter_by(api_key_hash=hash_api_key(api_key)).first()
     if not agent:
         raise HTTPException(401, "unknown key")
     _rate_limit(db, agent.id)  # before any signature work, so a stolen key alone cannot burn CPU
     if agent.status == "retired":
         raise HTTPException(403, "wallet retired")
     try:
-        ts = int(x_timestamp)
+        ts = int(timestamp)
     except ValueError:
         raise HTTPException(401, "bad timestamp")
     now = int(dt.datetime.now(dt.timezone.utc).timestamp())
     if abs(now - ts) > config.SIGNATURE_WINDOW_SECONDS:
         raise HTTPException(401, "timestamp outside window")
-    if not (8 <= len(x_nonce) <= 64):
+    if not (8 <= len(nonce) <= 64):
         raise HTTPException(401, "bad nonce")
-    if db.get(Nonce, (agent.id, x_nonce)):
-        db.add(AuditEvent(agent_id=agent.id, event="replay_rejected", detail=x_nonce))
+    if db.get(Nonce, (agent.id, nonce)):
+        db.add(AuditEvent(agent_id=agent.id, event="replay_rejected", detail=nonce))
         db.commit()
         raise HTTPException(401, "nonce reused")
-    body = await request.body()
-    msg = request_message(request.method, request.url.path, x_timestamp, x_nonce, body, request.url.query)
-    if not verify(msg, x_signature, agent.wallet):
+    msg = request_message(method, path, timestamp, nonce, body, query)
+    if not verify(msg, signature, agent.wallet):
         raise HTTPException(401, "signature does not match wallet")
-    db.add(Nonce(agent_id=agent.id, nonce=x_nonce))
+    db.add(Nonce(agent_id=agent.id, nonce=nonce))
     db.commit()
     return agent
 

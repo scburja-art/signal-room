@@ -231,9 +231,13 @@ def room_listing(db: Session, pair: str | None, horizon: str | None, limit: int 
         q = q.filter(Signal.horizon == horizon)
     rows = q.order_by(Signal.submitted_at.desc()).limit(limit).all()
     out = []
+    records: dict[tuple[str, str], dict] = {}  # one record query per author per horizon, not per signal
     for s in rows:
         a = db.get(Agent, s.agent_id)
-        rec = agent_record(db, s.agent_id, s.horizon, "90d")
+        key = (s.agent_id, s.horizon)
+        if key not in records:
+            records[key] = agent_record(db, s.agent_id, s.horizon, "90d")
+        rec = records[key]
         out.append({
             "signal_id": s.id, "agent_id": s.agent_id, "agent_name": a.name if a else "",
             "pair": s.pair, "horizon": s.horizon, "submitted_at": s.submitted_at.isoformat(),

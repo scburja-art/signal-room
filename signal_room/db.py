@@ -202,6 +202,14 @@ def _migrate(eng) -> None:
                 "WHEN result = 'void' THEN NULL "
                 "ELSE 2 END WHERE resolved_at IS NOT NULL"
             ))
+        # The backfill above could not tell an old 'right' row from a new one (same shape under both
+        # rule sets), so it labelled every right call version 2. Any right call resolved no later
+        # than the last row that is definitely version 1 was scored under version 1. Labels only;
+        # no Brier or credit changes.
+        conn.execute(text(
+            "UPDATE signals SET scoring_version = 1 WHERE scoring_version = 2 AND result = 'right' "
+            "AND resolved_at <= (SELECT MAX(resolved_at) FROM signals WHERE scoring_version = 1)"
+        ))
         conn.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_one_open ON signals (agent_id, pair, horizon) "
             "WHERE resolved_at IS NULL"

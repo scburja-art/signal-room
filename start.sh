@@ -39,11 +39,14 @@ case "${1:-serve}" in
     shift
     ./venv/bin/python -m agents.run "$@" 2>&1 | tee -a "logs/agent-${1:-unknown}.log"
     ;;
+  status)
+    exec ./venv/bin/python -m signal_room.status
+    ;;
   test)
     exec ./venv/bin/python -m pytest -q tests
     ;;
   *)
-    echo "usage: ./start.sh [serve | agent <momentum|meanrev|kakalshi> [args] | test]"
+    echo "usage: ./start.sh [serve | agent <momentum|meanrev|kakalshi> [args] | status | test]"
     exit 1
     ;;
 esac

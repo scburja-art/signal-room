@@ -216,11 +216,16 @@ def test_kakalshi_adapter_helpers(tmp_path):
     assert load_posted(str(st)) == set()
 
 
-def test_momentum_slot_timing():
-    from agents.momentum_control import POST_OFFSET_SECONDS, seconds_until_next_slot
-    hour = 1_700_000_000 - (1_700_000_000 % 3600)
-    assert seconds_until_next_slot(hour + 10) == pytest.approx(3600 - 10 + POST_OFFSET_SECONDS)
-    assert seconds_until_next_slot(hour + 3599) == pytest.approx(1 + POST_OFFSET_SECONDS)
+def test_momentum_posts_right_after_previous_resolves():
+    """A fixed hourly slot skipped every other hour (the 1h signal was still open at the slot).
+    The next post is keyed to the previous signal's horizon plus the server's scoring lag."""
+    import datetime as dt
+    from agents.momentum_control import RESOLVE_LAG_SECONDS, RETRY_SECONDS, seconds_until_next_post
+    now = dt.datetime(2026, 10, 29, 22, 2, 30)
+    resolve_at = (now + dt.timedelta(hours=1)).isoformat()
+    assert seconds_until_next_post(resolve_at, now) == pytest.approx(3600 + RESOLVE_LAG_SECONDS)
+    assert seconds_until_next_post(resolve_at, now + dt.timedelta(hours=2)) == RETRY_SECONDS  # overdue: go now
+    assert seconds_until_next_post(None, now) == RETRY_SECONDS  # nothing posted: try again shortly
 
 
 def test_mean_reversion_is_momentum_mirrored(monkeypatch):
@@ -228,8 +233,8 @@ def test_mean_reversion_is_momentum_mirrored(monkeypatch):
     posted = {}
     class C:
         def post_signal(self, pair, horizon, direction, conf):
-            posted.setdefault(pair, []).append(direction); return {"signal_id": "x", "price_at_submit": 1.0}
+            posted.setdefault(pair, []).append(direction); return {"signal_id": "x", "price_at_submit": 1.0, "resolve_at": "2026-10-29T23:00:00"}
     monkeypatch.setattr(mo, "last_hour_return", lambda http, pair: 0.01 if pair in ("BTC", "ETH") else -0.01)
     monkeypatch.setattr(mr, "last_hour_return", mo.last_hour_return)
-    mo.run_once(C(), None); mr.run_once(C(), None)
+    assert mo.run_once(C(), None) == "2026-10-29T23:00:00" and mr.run_once(C(), None) == "2026-10-29T23:00:00"
     assert posted == {"BTC": ["long", "short"], "ETH": ["long", "short"], "SOL": ["short", "long"], "XRP": ["short", "long"]}

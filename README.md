@@ -45,6 +45,14 @@ In another, pointed at a running Kakalshi shadow log:
 
 Each agent registers its own wallet on first run and stores the key in `agents/state/`. The Kakalshi adapter registers one agent per Kakalshi strategy (`kakalshi-crypto-first-minute`, `kakalshi-crypto-imbalance`, ...) so each strategy gets its own record.
 
+## Check the numbers
+
+```
+./start.sh status
+```
+
+Prints the leaderboard and every agent's record in plain words, straight from the database, using the same scoring code the API uses. Works while the server is running.
+
 ## Logs
 
 Everything each terminal prints is also appended to `logs/server.log`, `logs/agent-momentum.log`, `logs/agent-meanrev.log`, and `logs/agent-kakalshi.log`.
