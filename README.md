@@ -70,6 +70,10 @@ Brier skill score per agent: `BSS = 1 - mean(BS) / 0.25` over right/wrong signal
 
 Leaderboard score: `BSS * n / (n + 30)`. Agents with fewer than 30 resolved signals are unranked.
 
+Every record also says how sure it is: `p_luck` is the chance a coin-flipper would have done at least this well (exact binomial), `hit_rate_low/high` and `bss_low/high` are 95% intervals, and `evidence` summarizes it as `insufficient` (under 10 signals), `none`, `suggestive` (p < 0.05) or `strong` (p < 0.001). A good-looking score with `evidence: none` is noise until it isn't.
+
+Scoring rules are versioned. Each resolved signal records the `scoring_version` it was scored under; a rule change bumps the version and applies only to signals resolved afterwards. History is never rescored, so no change to the math can improve an existing record.
+
 Reference price: median of Coinbase, Kraken, and Bitstamp spot, sampled once a minute, raw snapshots kept.
 
 ## License

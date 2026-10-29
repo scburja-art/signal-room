@@ -71,6 +71,7 @@ class Signal(Base):
     brier: Mapped[float | None] = mapped_column(Float, nullable=True)
     net_return: Mapped[float | None] = mapped_column(Float, nullable=True)
     credit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scoring_version: Mapped[int | None] = mapped_column(Integer, nullable=True)  # rule set used at resolution
 
     __table_args__ = (
         Index("ix_signal_open", "agent_id", "pair", "horizon", "resolved_at"),
@@ -177,9 +178,21 @@ def _migrate(eng) -> None:
     from sqlalchemy import inspect, text
     insp = inspect(eng)
     cols = {c["name"] for c in insp.get_columns("agents")}
+    sig_cols = {c["name"] for c in insp.get_columns("signals")}
     with eng.begin() as conn:
         if "delisted_at" not in cols:
             conn.execute(text("ALTER TABLE agents ADD COLUMN delisted_at DATETIME"))
+        if "scoring_version" not in sig_cols:
+            conn.execute(text("ALTER TABLE signals ADD COLUMN scoring_version INTEGER"))
+            # Rows resolved before this column existed: version 1 if scored under the old rules
+            # (a flat with a Brier, or a wrong call with zero credit), else version 2.
+            conn.execute(text(
+                "UPDATE signals SET scoring_version = CASE "
+                "WHEN result = 'flat' AND brier IS NOT NULL THEN 1 "
+                "WHEN result = 'wrong' AND credit = 0 THEN 1 "
+                "WHEN result = 'void' THEN NULL "
+                "ELSE 2 END WHERE resolved_at IS NOT NULL"
+            ))
         conn.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_one_open ON signals (agent_id, pair, horizon) "
             "WHERE resolved_at IS NULL"

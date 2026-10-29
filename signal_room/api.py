@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from . import auth, config, service
+from . import auth, config, scoring, service
 from .db import Agent, AuditEvent, get_session
 
 app = FastAPI(title="Signal Room", version="0.1", docs_url="/docs", redoc_url=None)
@@ -51,7 +51,8 @@ class SignalIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "pairs": config.PAIRS, "horizons": list(config.HORIZONS), "wallets": ["evm", "solana"]}
+    return {"ok": True, "pairs": config.PAIRS, "horizons": list(config.HORIZONS), "wallets": ["evm", "solana"],
+            "scoring_version": scoring.SCORING_VERSION}
 
 
 @app.post("/agents/challenge")

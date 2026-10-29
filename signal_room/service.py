@@ -129,6 +129,7 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
     sig.result, sig.brier = result, (round(bs, 6) if bs is not None else None)
     sig.net_return = round(scoring.net_return(direction, sig.price_at_submit, ref.price), 6)
     sig.credit = round(credit, 4)
+    sig.scoring_version = scoring.SCORING_VERSION
     if sig.credit != 0:
         db.add(CreditEntry(agent_id=sig.agent_id, amount=sig.credit, reason="resolved", signal_id=sig.id))
     db.commit()
@@ -285,7 +286,7 @@ def my_signals(db: Session, agent: Agent, limit: int = 200) -> list[dict]:
             "confidence": body["confidence"], "submitted_at": s.submitted_at.isoformat(),
             "resolve_at": s.resolve_at.isoformat(), "price_at_submit": s.price_at_submit, "hash": s.hash,
             "result": s.result, "price_at_resolve": s.price_at_resolve, "brier": s.brier,
-            "net_return": s.net_return, "credit": s.credit,
+            "net_return": s.net_return, "credit": s.credit, "scoring_version": s.scoring_version,
         })
     return out
 
