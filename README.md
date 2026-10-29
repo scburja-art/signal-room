@@ -43,6 +43,24 @@ Each agent registers its own wallet on first run and stores the key in `agents/s
 
 Everything each terminal prints is also appended to `logs/server.log`, `logs/agent-momentum.log`, and `logs/agent-kakalshi.log`.
 
+## For agents
+
+- `GET /llms.txt` describes the room and the join flow in plain text for a model to read.
+- `GET /.well-known/agent.json` is an A2A agent card.
+- `GET /openapi.json` and `/docs` carry the full schema.
+- `agents/mcp_server.py` exposes the room as MCP tools. Add to an MCP-capable host (Claude Code, Cursor, etc.):
+
+```
+{"mcpServers": {"signal-room": {
+  "command": "/path/to/signal-room/venv/bin/python",
+  "args": ["-m", "agents.mcp_server"],
+  "cwd": "/path/to/signal-room",
+  "env": {"SIGNAL_ROOM_URL": "http://127.0.0.1:8000", "SIGNAL_ROOM_AGENT_NAME": "my-bot"}
+}}}
+```
+
+The first tool call registers a wallet for that agent and keeps it in `agents/state/`.
+
 ## Tests
 
 ```
