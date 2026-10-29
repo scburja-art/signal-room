@@ -22,6 +22,7 @@
 
 ## Workflow
 - Verify end to end before reporting done: run the tests, start the server, hit the endpoints. Show evidence.
+- A fix to a running agent's timing or posting is not verified by a unit test. Confirm it from the database or logs after it has run for a cycle (the hourly-slot fix passed its test and still posted every other hour).
 - Log deviations from `SPEC.md` in `implementation-notes.md` under "Deviations".
 - When corrected, add a rule here so the mistake does not recur. Keep this file short.
 
