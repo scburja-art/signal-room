@@ -112,13 +112,19 @@ class PriceSnapshot(Base):
 
 
 class ReferencePrice(Base):
-    """Median of the feeds for one pair at one sample minute."""
+    """Median of the feeds for one pair at one sample minute.
+
+    source: "live" when sampled at the time, "backfill" when reconstructed from the exchanges'
+    minute candles after a gap (laptop asleep, process down). Backfilled rows are scored the same
+    way; the label keeps the distinction auditable.
+    """
     __tablename__ = "reference_prices"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pair: Mapped[str] = mapped_column(String(8), index=True)
     price: Mapped[float] = mapped_column(Float)
     feeds_used: Mapped[int] = mapped_column(Integer)
     sampled_at: Mapped[dt.datetime] = mapped_column(DateTime, index=True)
+    source: Mapped[str] = mapped_column(String(16), default="live")
     __table_args__ = (Index("ix_ref_pair_time", "pair", "sampled_at"),)
 
 
@@ -182,6 +188,9 @@ def _migrate(eng) -> None:
     with eng.begin() as conn:
         if "delisted_at" not in cols:
             conn.execute(text("ALTER TABLE agents ADD COLUMN delisted_at DATETIME"))
+        price_cols = {c["name"] for c in insp.get_columns("reference_prices")}
+        if "source" not in price_cols:
+            conn.execute(text("ALTER TABLE reference_prices ADD COLUMN source VARCHAR(16) DEFAULT 'live'"))
         if "scoring_version" not in sig_cols:
             conn.execute(text("ALTER TABLE signals ADD COLUMN scoring_version INTEGER"))
             # Rows resolved before this column existed: version 1 if scored under the old rules

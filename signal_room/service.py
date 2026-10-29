@@ -109,6 +109,15 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
         if still_waiting:
             return False
         if ref is None:
+            # The sampler missed this minute (machine asleep, process down). Rebuild it from the
+            # exchanges' candles before giving up; void only if that is impossible too.
+            age_hours = (now - sig.resolve_at).total_seconds() / 3600
+            if age_hours <= config.BACKFILL_WINDOW_HOURS:
+                prices.backfill(db, sig.pair, sig.resolve_at - dt.timedelta(minutes=2), sig.resolve_at + dt.timedelta(minutes=2))
+                ref = prices.nearest(db, sig.pair, sig.resolve_at, config.RESOLVE_TOLERANCE_SECONDS)
+                if ref is None:
+                    return False  # feeds unreachable right now (just woke up?); try again next tick
+        if ref is None:
             body = unseal(sig.agent_id, sig.body_cipher)
             sig.direction, sig.confidence = body["direction"], body["confidence"]
             sig.result, sig.resolved_at, sig.credit = "void", now, 0.0

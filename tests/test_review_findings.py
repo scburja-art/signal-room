@@ -106,7 +106,9 @@ def test_stale_price_gives_503(client, session_factory):
     assert a.post("/signals", {"pair": "SOL", "horizon": "1h", "direction": "long", "confidence": 0.6}).status_code == 503
 
 
-def test_void_flat_and_resolution_waits_for_post_horizon_sample(client, session_factory):
+def test_void_flat_and_resolution_waits_for_post_horizon_sample(client, session_factory, monkeypatch):
+    from signal_room import prices
+    monkeypatch.setattr(prices, "CANDLE_FEEDS", {})  # no exchange history available in this test
     a = Agent(client, "s")
     set_price(session_factory, "XRP", 1.0)
     sid = a.post("/signals", {"pair": "XRP", "horizon": "15m", "direction": "long", "confidence": 0.7}).json()["signal_id"]
@@ -120,13 +122,14 @@ def test_void_flat_and_resolution_waits_for_post_horizon_sample(client, session_
     assert service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=10)) == 1
     s.refresh(sig)
     assert sig.result == "flat" and sig.credit == 0.0 and sig.resolved_at == sig.resolve_at
-    # Void: a signal with no price anywhere near its horizon, past tolerance.
+    # Void: a signal with no price anywhere near its horizon, and no exchange history to rebuild it from.
     s.query(ReferencePrice).delete(); s.commit()
     set_price(session_factory, "XRP", 1.0)
     sid2 = a.post("/signals", {"pair": "XRP", "horizon": "15m", "direction": "long", "confidence": 0.7}).json()["signal_id"]
     sig2 = s.query(Signal).filter_by(id=sid2).first()
     s.query(ReferencePrice).delete(); s.commit()
-    assert service.resolve_due(s, now=sig2.resolve_at + dt.timedelta(seconds=200)) == 1
+    assert service.resolve_due(s, now=sig2.resolve_at + dt.timedelta(seconds=200)) == 0  # still inside the backfill window: waits
+    assert service.resolve_due(s, now=sig2.resolve_at + dt.timedelta(hours=config.BACKFILL_WINDOW_HOURS + 1)) == 1
     s.refresh(sig2)
     assert sig2.result == "void" and sig2.credit == 0.0
     s.close()

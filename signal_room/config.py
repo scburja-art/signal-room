@@ -15,6 +15,7 @@ MAX_CONFIDENCE = 1.00
 SIGNATURE_WINDOW_SECONDS = 60
 PRICE_MAX_AGE_SECONDS = 180          # a signal needs a reference price no older than this
 RESOLVE_TOLERANCE_SECONDS = 90       # nearest snapshot to (submit + horizon) must be within this
+BACKFILL_WINDOW_HOURS = 72           # how far back a missing price can be reconstructed from exchange candles
 FLAT_BAND = 0.0005                   # ±0.05% resolves as flat
 ROUND_TRIP_COST = 0.001              # 0.10% assumed cost for net-return metric
 

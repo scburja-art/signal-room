@@ -7,9 +7,12 @@ import threading
 import time
 
 from . import anchor, auth, config, prices, service
-from .db import SessionLocal, utcnow
+from .db import AuditEvent, SessionLocal, utcnow
 
 log = logging.getLogger("signal_room.scheduler")
+
+
+_last_tick: list[float] = []
 
 
 def tick() -> dict:
@@ -17,6 +20,13 @@ def tick() -> dict:
     db = SessionLocal()
     out = {}
     try:
+        now_m = time.monotonic()
+        if _last_tick and now_m - _last_tick[0] > 3 * config.PRICE_SAMPLE_SECONDS:
+            gap = int(now_m - _last_tick[0])
+            log.warning("gap of %ss since last tick (sleep?); due signals will backfill prices from exchange candles", gap)
+            db.add(AuditEvent(event="tick_gap", detail=f"{gap}s"))
+            db.commit()
+        _last_tick[:] = [now_m]
         try:
             out["prices"] = len(prices.sample_all(db))
         except Exception as e:
