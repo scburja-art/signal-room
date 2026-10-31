@@ -189,11 +189,17 @@ def _resolved_query(db: Session, agent_id: str, horizon: str | None, since: dt.d
     return q.order_by(Signal.resolved_at)
 
 
+def _record(rows: list[Signal]) -> scoring.Record:
+    clusters = scoring.cluster_ids([s.submitted_at for s in rows], config.BATCH_WINDOW_SECONDS)
+    return scoring.record([s.brier for s in rows], [s.result for s in rows],
+                          [s.net_return for s in rows if s.net_return is not None], clusters)
+
+
 def agent_record(db: Session, agent_id: str, horizon: str | None = None, window: str = "90d") -> dict:
     since = {"30d": 30, "90d": 90}.get(window)
     since_dt = utcnow() - dt.timedelta(days=since) if since else None
     rows = _resolved_query(db, agent_id, horizon, since_dt).all()
-    rec = scoring.record([s.brier for s in rows], [s.result for s in rows], [s.net_return for s in rows if s.net_return is not None])
+    rec = _record(rows)
     return {"horizon": horizon or "all", "window": window, **rec.__dict__}
 
 
@@ -212,7 +218,7 @@ def leaderboard(db: Session, horizon: str | None, pair: str | None, window: str,
         if pair:
             q = q.filter(Signal.pair == pair)
         rows = q.all()
-        rec = scoring.record([s.brier for s in rows], [s.result for s in rows], [s.net_return for s in rows if s.net_return is not None])
+        rec = _record(rows)
         if rec.ranked:
             out.append({"agent_id": a.id, "name": a.name, **rec.__dict__})
     out.sort(key=lambda r: r["score"], reverse=True)

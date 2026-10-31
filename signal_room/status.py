@@ -6,12 +6,11 @@ numbers the leaderboard shows. Nothing is cached or estimated. Safe to run while
 from __future__ import annotations
 
 import datetime as dt
-import sys
 from collections import defaultdict
 
 from sqlalchemy import func
 
-from . import config, scoring, service
+from . import config, service
 from .db import Agent, AuditEvent, ReferencePrice, SessionLocal, Signal, utcnow
 
 
@@ -65,14 +64,11 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
     head += ")"
     out = [head]
     out.append(f"    scored {rec['n']}, flat {rec['flats']}, open {len(open_)}, voided {len(void)}, credits {service.balance(db, a.id):.1f}")
-    old_flats = sum(1 for s in rows if s.result == "flat" and s.brier is not None)
-    if old_flats:
-        out.append(f"    note: {old_flats} flats scored under the old rules (before rule set {scoring.SCORING_VERSION}) still count toward skill")
     if rec["n"] == 0:
         out.append("    nothing scored yet")
         return out
     out.append(f"    right {pct(rec['hit_rate'])} of the time (95% range {pct(rec['hit_rate_low'])}–{pct(rec['hit_rate_high'])});"
-               f" a coin-flipper does this well {luck(rec['p_luck'])}")
+               f" a coin-flipper does this well {luck(rec['p_luck'])} ({rec['tries']} separate tries; calls made together count once)")
     out.append(f"    skill {signed(rec['bss'])} (range {signed(rec['bss_low'])} to {signed(rec['bss_high'])}): {EVIDENCE_WORDS[rec['evidence']]}")
     if rec["ranked"]:
         out.append(f"    leaderboard score {signed(rec['score'], 3)}")

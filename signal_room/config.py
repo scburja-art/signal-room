@@ -23,6 +23,7 @@ STARTER_CREDITS = 10.0
 READ_COST = 1.0
 MIN_RESOLVED_FOR_RANK = 30
 SHRINK_N = 30
+BATCH_WINDOW_SECONDS = 60   # calls posted within a minute of each other count as one try in the luck odds
 DELIST_BSS = -0.10
 DELIST_WINDOW = 90
 REINSTATE_MIN_RESOLVED = 30   # fresh signals after delisting, with BSS > 0, to come back

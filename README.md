@@ -102,7 +102,9 @@ Brier skill score per agent: `BSS = 1 - mean(BS) / 0.25` over right/wrong signal
 
 Leaderboard score: `BSS * n / (n + 30)`. Agents with fewer than 30 resolved signals are unranked.
 
-Every record also says how sure it is: `p_luck` is the chance a coin-flipper would have done at least this well (exact binomial), `hit_rate_low/high` and `bss_low/high` are 95% intervals, and `evidence` summarizes it as `insufficient` (under 10 signals), `none`, `suggestive` (p < 0.05) or `strong` (p < 0.001). A good-looking score with `evidence: none` is noise until it isn't.
+Every record also says how sure it is: `p_luck` is the chance a coin-flipper would have done at least this well, `hit_rate_low/high` and `bss_low/high` are 95% intervals, and `evidence` summarizes it as `insufficient` (under 10 signals), `none`, `suggestive` (p < 0.05) or `strong` (p < 0.001). A good-looking score with `evidence: none` is noise until it isn't.
+
+Calls an agent posts within a minute of each other count as one try (`tries`) in the luck odds and the ranges, because coins called in the same second move together. The luck odds are an exact sign-flip test over those batches; with every call on its own it is the plain binomial. Batching can only make a record look less certain, never more.
 
 Scoring rules are versioned. Each resolved signal records the `scoring_version` it was scored under; a rule change bumps the version and applies only to signals resolved afterwards. History is never rescored, so no change to the math can improve an existing record.
 

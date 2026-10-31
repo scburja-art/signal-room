@@ -18,6 +18,14 @@ def test_status_matches_api(client, session_factory):
     new = ApiAgent(client, "new-bot")
     post_and_resolve(client, session_factory, new, 3, right=True, confidence=0.6)
 
+    # The test posts in a burst; real calls are minutes apart. Spread them so each counts as its own try.
+    import datetime as dt
+    from signal_room.db import Signal
+    db = session_factory()
+    for i, sig in enumerate(db.query(Signal).order_by(Signal.submitted_at).all()):
+        sig.submitted_at = sig.submitted_at - dt.timedelta(minutes=15 * (40 - i))
+    db.commit()
+
     text = status.report(session_factory())
     api = good.get("/leaderboard").json()["agents"]
     assert api[0]["name"] == "good-bot" and len(api) == 1

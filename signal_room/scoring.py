@@ -14,6 +14,14 @@ earned 1 on wins and 0 on losses, 0.5 per signal in expectation. Signed, that sa
 averages -1 per signal, a coin-flipper at p=0.5 averages 0, and an honest 80%-accurate agent
 at p=0.8 averages about +0.36. Brier is a proper scoring rule, so honest confidence is the
 credit-maximizing strategy.
+
+Calls posted together count as one try in the luck odds and the ranges. Four coins called in the
+same second move together, so treating them as four independent coin flips overstated how sure a
+record was (a control agent riding one choppy weekend read as "probably not luck"). The luck odds
+are an exact sign-flip test over batches: under "the calls carry no information", flipping every
+call in a batch is as likely as not, so each batch's (right - size/2) is equally likely to be + or -.
+With every batch of size one this is exactly the old binomial test. The ranges widen by the design
+effect of the batching, never narrow.
 """
 from __future__ import annotations
 
@@ -28,6 +36,8 @@ COIN_FLIP_BS = 0.25
 # and applies only to signals resolved afterwards; history is never rescored.
 #   1  2026-10-26: flats scored as y=0.5; credit floored at zero
 #   2  2026-10-28: flats unscored; credits signed
+# Record-level changes, no per-signal change (version stays 2):
+#      2026-10-31: calls posted together count as one try; flats scored under 1 left out of aggregates
 SCORING_VERSION = 2
 
 
@@ -70,6 +80,67 @@ def shrink(bss: float, n: int) -> float:
     return bss * n / (n + config.SHRINK_N)
 
 
+def cluster_ids(times: list, window_seconds: float) -> list[int]:
+    """Batch id per call: a call within window_seconds of its batch's first call joins that batch.
+    Returned in the input's order; the input need not be sorted."""
+    order = sorted(range(len(times)), key=lambda i: times[i])
+    ids = [0] * len(times)
+    batch, start = -1, None
+    for i in order:
+        if start is None or (times[i] - start).total_seconds() > window_seconds:
+            batch, start = batch + 1, times[i]
+        ids[i] = batch
+    return ids
+
+
+def _batches(hits: list[int], clusters: list | None) -> list[tuple[int, int]]:
+    """(right, size) per batch. No clusters → every call is its own batch."""
+    if clusters is None:
+        return [(h, 1) for h in hits]
+    agg: dict = {}
+    for h, c in zip(hits, clusters):
+        r, n = agg.get(c, (0, 0))
+        agg[c] = (r + h, n + 1)
+    return list(agg.values())
+
+
+def p_luck_batched(batches: list[tuple[int, int]]) -> float:
+    """Chance a no-information caller does at least this well, batches flipping as a unit
+    (exact sign-flip test). Equals p_luck when every batch has size one."""
+    if not batches:
+        return 1.0
+    d = [2 * r - n for r, n in batches]           # 2 * (right - size/2), an integer
+    observed = sum(d)
+    dist = {0: 1}
+    for x in d:
+        nxt: dict[int, int] = {}
+        for s_, w in dist.items():
+            for v in (s_ + x, s_ - x):
+                nxt[v] = nxt.get(v, 0) + w
+        dist = nxt
+    hits = sum(w for v, w in dist.items() if v >= observed)
+    return min(1.0, hits / 2 ** len(d))
+
+
+def design_effect(values: list[float], clusters: list | None) -> float:
+    """How much batching inflates the variance of a mean (cluster-robust over plain), at least 1."""
+    n = len(values)
+    if clusters is None or n < 2:
+        return 1.0
+    mean = sum(values) / n
+    plain = sum((v - mean) ** 2 for v in values)
+    if plain == 0:
+        return 1.0
+    sums: dict = {}
+    for v, c in zip(values, clusters):
+        sums[c] = sums.get(c, 0.0) + (v - mean)
+    m = len(sums)
+    if m < 2:
+        return float(n)
+    robust = sum(t * t for t in sums.values()) * (m / (m - 1)) * ((n - 1) / n)
+    return max(1.0, robust / plain)
+
+
 def p_luck(k: int, n: int) -> float:
     """Probability of at least k right out of n if the agent were a coin flip (one-sided exact binomial).
     Small is good: 0.05 is suggestive, 0.001 is strong. 1.0 when there is nothing to test."""
@@ -78,9 +149,10 @@ def p_luck(k: int, n: int) -> float:
     return min(1.0, sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n)
 
 
-def wilson_interval(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """95% confidence interval for a hit rate. Behaves sensibly at small n and near 0 or 1."""
-    if n == 0:
+def wilson_interval(k: float, n: float, z: float = 1.96) -> tuple[float, float]:
+    """95% confidence interval for a hit rate. Behaves sensibly at small n and near 0 or 1.
+    k and n may be effective (fractional) counts after a design-effect adjustment."""
+    if n <= 0:
         return 0.0, 1.0
     p = k / n
     denom = 1 + z * z / n
@@ -89,14 +161,15 @@ def wilson_interval(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
-def bss_interval(briers: list[float], z: float = 1.96) -> tuple[float, float]:
-    """95% interval for the Brier skill score from the standard error of the mean Brier."""
+def bss_interval(briers: list[float], z: float = 1.96, deff: float = 1.0) -> tuple[float, float]:
+    """95% interval for the Brier skill score from the standard error of the mean Brier,
+    widened by the design effect when calls were batched."""
     n = len(briers)
     if n < 2:
         return -1.0, 1.0
     mean = sum(briers) / n
     sd = math.sqrt(sum((b - mean) ** 2 for b in briers) / (n - 1))
-    se = sd / math.sqrt(n)
+    se = sd / math.sqrt(n) * math.sqrt(deff)
     return 1.0 - (mean + z * se) / COIN_FLIP_BS, 1.0 - (mean - z * se) / COIN_FLIP_BS
 
 
@@ -129,16 +202,24 @@ class Record:
     bss_low: float = -1.0
     bss_high: float = 1.0
     evidence: str = "insufficient"
+    tries: int = 0       # independent tries: calls posted together count once
 
 
-def record(briers: list[float | None], results: list[str], returns: list[float]) -> Record:
-    """briers/results/returns are parallel lists over resolved signals; flats carry brier None."""
-    scored_b = [b for b in briers if b is not None]
+def record(briers: list[float | None], results: list[str], returns: list[float],
+           clusters: list | None = None) -> Record:
+    """briers/results/clusters are parallel lists over resolved signals; returns covers those with
+    a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved under
+    rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
+    clusters: batch id per signal (see cluster_ids); None treats every call as independent."""
+    keep = [i for i, r in enumerate(results) if r in ("right", "wrong")]
+    scored_b = [briers[i] for i in keep]
+    hits = [1 if results[i] == "right" else 0 for i in keep]
+    cl = [clusters[i] for i in keep] if clusters is not None else None
     n = len(scored_b)
     flats = sum(1 for r in results if r == "flat")
     bss = skill_score(scored_b)
-    scored = [r for r in results if r in ("right", "wrong")]
-    hit = sum(1 for r in scored if r == "right") / len(scored) if scored else 0.0
+    k = sum(hits)
+    hit = k / n if n else 0.0
     cum = 1.0
     peak = 1.0
     mdd = 0.0
@@ -153,16 +234,18 @@ def record(briers: list[float | None], results: list[str], returns: list[float])
         sd = math.sqrt(var)
         if sd > 0:
             sharpe = mean / sd * math.sqrt(len(returns))
-    k = sum(1 for r in scored if r == "right")
-    p = p_luck(k, len(scored))
-    hlo, hhi = wilson_interval(k, len(scored))
-    blo, bhi = bss_interval(scored_b)
+    batches = _batches(hits, cl)
+    p = p_luck_batched(batches)
+    n_eff = n / design_effect([float(h) for h in hits], cl) if n else 0.0
+    hlo, hhi = wilson_interval(hit * n_eff, n_eff)
+    blo, bhi = bss_interval(scored_b, deff=design_effect(scored_b, cl))
     return Record(
         n=n, flats=flats, bss=round(bss, 4), score=round(shrink(bss, n), 4),
         ranked=n >= config.MIN_RESOLVED_FOR_RANK, hit_rate=round(hit, 4),
         cum_return=round(cum - 1.0, 6), sharpe=round(sharpe, 4), max_drawdown=round(mdd, 6),
         p_luck=round(p, 6), hit_rate_low=round(hlo, 4), hit_rate_high=round(hhi, 4),
-        bss_low=round(blo, 4), bss_high=round(bhi, 4), evidence=evidence(len(scored), p),
+        bss_low=round(blo, 4), bss_high=round(bhi, 4), evidence=evidence(len(batches), p),
+        tries=len(batches),
     )
 
 
