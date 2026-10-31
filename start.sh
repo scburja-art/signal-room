@@ -63,7 +63,7 @@ case "${1:-serve}" in
     if ! curl -s "http://127.0.0.1:$PORT/health" > /dev/null 2>&1; then
       echo "The server did not start. Last lines of logs/server.log:"; tail -20 logs/server.log; exit 1
     fi
-    echo "Server up on port $PORT."
+    echo "Signal Room is up (port $PORT). Bots joining..."
     # The viewer starts before the agents so their first lines show. It runs in the background and the
     # script waits on it, so Ctrl+C reaches stop_all at once.
     touch logs/agent-momentum.log logs/agent-meanrev.log logs/agent-reader.log logs/agent-kakalshi.log
@@ -72,17 +72,14 @@ case "${1:-serve}" in
     for agent in momentum meanrev reader; do
       ./venv/bin/python -m agents.run "$agent" >> "logs/agent-$agent.log" 2>&1 &
       PIDS+=($!)
-      echo "Started $agent."
     done
     if [ -f "$KAKALSHI_LOG" ]; then
       ./venv/bin/python -m agents.run kakalshi "$KAKALSHI_LOG" >> logs/agent-kakalshi.log 2>&1 &
       PIDS+=($!)
-      echo "Started kakalshi adapter."
     else
-      echo "Kakalshi log not found at $KAKALSHI_LOG; adapter not started."
+      echo "Kakalshi's paper log isn't at $KAKALSHI_LOG, so Kakalshi's calls won't come in."
     fi
-    echo "Showing what matters (new calls, scoring, problems). Ctrl+C stops everything."
-    echo
+    echo "Live feed below. Ctrl+C stops everything."
     wait "$FEED"
     ;;
   status)

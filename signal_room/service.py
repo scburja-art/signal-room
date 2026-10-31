@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import threading
 
@@ -15,6 +16,17 @@ from .db import Agent, AuditEvent, CreditEntry, DailyLog, Read, Signal, utcnow
 from .sealing import merkle_root, new_salt, seal, signal_hash, unseal
 
 log = logging.getLogger("signal_room.service")
+
+
+def event(kind: str, **fields) -> None:
+    """One machine-readable line per thing that happened, for the live feed. Never carries an open
+    call's direction or confidence: those appear only once the call has closed."""
+    log.info("EVENT %s", json.dumps({"kind": kind, **fields}, default=str))
+
+
+def _name(db: Session, agent_id: str) -> str:
+    a = db.get(Agent, agent_id)
+    return a.name if a and a.name else agent_id
 
 # Serializes check-then-debit on credits. One process, so a process lock is enough; a second
 # process would need a row lock or a balance table with a CHECK constraint.
@@ -80,6 +92,7 @@ def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction:
     except IntegrityError:  # lost a race with a concurrent post for the same pair/horizon
         db.rollback()
         raise HTTPException(409, "one open signal per pair per horizon")
+    event("posted", agent=agent.name or agent.id, pair=pair, horizon=horizon, closes=sig.resolve_at.isoformat())
     return sig
 
 
@@ -133,8 +146,7 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
             sig.result, sig.resolved_at, sig.credit = "void", now, 0.0
             db.add(AuditEvent(agent_id=sig.agent_id, event="signal_void", detail=sig.id))
             db.commit()
-            author = db.get(Agent, sig.agent_id)
-            log.info("scored %s %s %s = void (no price could be had)", author.name if author else sig.agent_id, sig.pair, sig.horizon)
+            event("scored", agent=_name(db, sig.agent_id), pair=sig.pair, horizon=sig.horizon, result="void")
             return True
     body = unseal(sig.agent_id, sig.body_cipher)
     direction, confidence = body["direction"], float(body["confidence"])
@@ -154,11 +166,9 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
     if sig.credit != 0:
         db.add(CreditEntry(agent_id=sig.agent_id, amount=sig.credit, reason="resolved", signal_id=sig.id))
     db.commit()
-    # After resolution the call is public record, so the local log may show it.
-    author = db.get(Agent, sig.agent_id)
-    log.info("scored %s %s %s %s at %.0f%%: %g -> %g = %s (credit %+.2f)",
-             author.name if author else sig.agent_id, sig.pair, sig.horizon, direction, confidence * 100,
-             sig.price_at_submit, ref.price, result, sig.credit)
+    # After resolution the call is public record, so it may be shown.
+    event("scored", agent=_name(db, sig.agent_id), pair=sig.pair, horizon=sig.horizon, direction=direction,
+          confidence=confidence, start=sig.price_at_submit, end=ref.price, result=result, credit=sig.credit)
     return True
 
 
@@ -184,6 +194,7 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
                 db.add(AuditEvent(agent_id=aid, event="delisted", detail=f"count_12mo={agent.delist_count}", created_at=now))
                 if agent.status == "retired":
                     db.add(AuditEvent(agent_id=aid, event="retired", detail="", created_at=now))
+                event(agent.status, agent=agent.name or aid)
         elif agent.status == "delisted":
             fresh = db.query(Signal).filter(
                 Signal.agent_id == aid, Signal.result.in_(("right", "wrong")),
@@ -192,6 +203,7 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
             if len(fresh) >= config.REINSTATE_MIN_RESOLVED and scoring.skill_score([s.brier for s in fresh]) > 0:
                 agent.status = "active"
                 db.add(AuditEvent(agent_id=aid, event="reinstated", detail=f"n={len(fresh)}", created_at=now))
+                event("reinstated", agent=agent.name or aid)
     db.commit()
 
 
@@ -322,8 +334,10 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
         with _credit_lock:
             already = db.get(Read, (reader.id, signal_id)) is not None
             if not already:
+                cost, verdict = 0.0, None
                 if sig.resolved_at is None:  # open signals cost credits; resolved ones are public record
-                    cost = read_cost(agent_record(db, sig.agent_id, sig.horizon, "90d")["verdict"])
+                    verdict = agent_record(db, sig.agent_id, sig.horizon, "90d")["verdict"]
+                    cost = read_cost(verdict)
                     bal = balance(db, reader.id)
                     if bal < cost:
                         raise HTTPException(402, detail={"message": "insufficient credits", "balance": bal, "cost": cost})
@@ -331,6 +345,9 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
                 db.add(Read(agent_id=reader.id, signal_id=sig.id))
                 db.add(AuditEvent(agent_id=reader.id, event="read", detail=sig.id))
                 db.commit()
+                if cost:
+                    event("read", agent=reader.name or reader.id, author=_name(db, sig.agent_id), pair=sig.pair,
+                          horizon=sig.horizon, verdict=verdict, cost=cost, left=balance(db, reader.id))
     body = unseal(sig.agent_id, sig.body_cipher)
     return {
         "signal_id": sig.id, "agent_id": sig.agent_id, "pair": sig.pair, "horizon": sig.horizon,

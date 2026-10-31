@@ -1,84 +1,220 @@
-"""The live feed in `./start.sh all`: reads every log line, drops routine noise, shortens and colors
-the rest. Each bot has its own color; scored calls show green for right, red for wrong.
+"""The live feed in `./start.sh all`, written for a person, not a programmer.
+
+Reads every log line, hides routine noise, and turns what is left into one plain sentence per thing
+that happened: a call posted (sealed), a call scored (revealed, right or wrong), a paid read, a bot
+delisted, a problem. Every bot has its own color. A short scoreboard prints at start and after
+scoring, at most every half hour.
 
     tail -F logs/*.log | python -m signal_room.feed
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 import re
 import sys
+import time
 
-RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
-GREEN, RED, YELLOW, GRAY = "\033[32m", "\033[31m", "\033[33m", "\033[90m"
+RESET, BOLD = "\033[0m", "\033[1m"
+GREEN, RED, YELLOW, GRAY, WHITE = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[37m"
 
-# Bot colors. Anything not listed (a new Kakalshi strategy, a stranger in a future log) gets white.
-WHO = {
-    "kakalshi": "\033[93m",          # bright yellow
-    "momentum": "\033[94m",          # bright blue
-    "meanrev": "\033[95m",           # bright magenta
-    "mean-reversion": "\033[95m",
-    "reader": "\033[96m",            # bright cyan
-    "room": "\033[37m",              # the server itself
+FAMILY_COLORS = {"kakalshi": "\033[93m", "momentum": "\033[94m", "meanrev": "\033[95m", "reader": "\033[96m"}
+NAMES = {
+    "momentum-control": "Momentum",
+    "meanrev-control": "Mean-rev",
+    "reader-control": "Reader",
+    "kakalshi-crypto-first-minute": "Kakalshi CFM",
+    "kakalshi-crypto-imbalance": "Kakalshi OBI",
 }
+LOGGER_NAMES = {"agents.momentum": "Momentum", "agents.meanrev": "Mean-rev", "agents.reader": "Reader",
+                "agents.kakalshi": "Kakalshi", "signal_room": "Room"}
+HORIZONS = {"15m": "15 min", "1h": "1 hour", "4h": "4 hours", "24h": "24 hours"}
+VERDICTS = {"unproven": "Unproven", "luck": "Luck", "probably_not_luck": "Probably not luck", "proven": "Proven",
+            "worse_than_chance": "Worse than chance", "delisted": "Delisted", "retired": "Retired"}
 
-NOISE = re.compile(r"still pending|already pending|HTTP/1\.1\" [234]\d\d |'resolved': 0\}|^==> |^\s*$")
-LINE = re.compile(r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d),\d+ (\w+) ([\w.]+): (.*)$")
-SCORED = re.compile(r"^scored (\S+) (.*)= (right|wrong|flat|void)(.*)$")
+LINE = re.compile(r"^\d{4}-\d\d-\d\d (\d\d):(\d\d):\d\d,\d+ (\w+) ([\w.]+): (.*)$")
+# Lines the feed never shows: retries, the agents' own copies of what the server reports, routine requests.
+HIDE = re.compile(
+    r"still pending|already pending|will retry|HTTP/1\.1\" [234]\d\d |'resolved': \d+\}|^==> |^\s*$"
+    r"|^(BTC|ETH|SOL|XRP) (long|short) @|^bet \S+ \[.*\] -> |^read \S+ \S+ \S+ by |nothing affordable to read"
+    r"|^(Started|Waiting for|Application|Finished|Shutting down)"
+)
 
 
-def who_of(logger: str, author: str | None = None) -> str:
-    """Short name for a log line's source: the scored call's author, or the logger that wrote it."""
-    name = author or logger
-    for key in ("kakalshi", "momentum", "meanrev", "mean-reversion", "reader"):
-        if key in name:
-            return "meanrev" if key == "mean-reversion" else key
-    return "room" if logger.startswith("signal_room") or logger.startswith("uvicorn") else name.split(".")[-1]
+def display(name: str) -> str:
+    return NAMES.get(name, name if len(name) <= 14 else name[:13] + "…")
 
 
-def paint(who: str, text: str, color: bool) -> str:
-    if not color:
-        return text
-    return f"{WHO.get(who, '')}{text}{RESET}"
+def color_of(name: str) -> str:
+    low = name.lower()
+    for family, code in FAMILY_COLORS.items():
+        if family in low or (family == "meanrev" and "mean-rev" in low):
+            return code
+    return WHITE
+
+
+def money(p: float) -> str:
+    if p >= 10000:
+        return f"${p:,.0f}"
+    if p >= 10:
+        return f"${p:,.2f}"
+    return f"${p:.4f}"
+
+
+def clock(hour: int, minute: int) -> str:
+    return dt.time(hour, minute).strftime("%I:%M %p").lstrip("0")
+
+
+def local(iso_utc: str) -> str:
+    """A UTC timestamp from the server, as a local clock time."""
+    t = dt.datetime.fromisoformat(iso_utc).replace(tzinfo=dt.timezone.utc).astimezone()
+    return t.strftime("%I:%M %p").lstrip("0")
+
+
+class Painter:
+    def __init__(self, color: bool):
+        self.color = color
+
+    def __call__(self, code: str, text: str) -> str:
+        return f"{code}{text}{RESET}" if self.color else text
+
+    def row(self, when: str, who: str, badge: str, badge_code: str, details: str) -> str:
+        name = self(color_of(who) + BOLD, f"{display(who):<13}")
+        return f"{self(GRAY, f'{when:>8}')}  {name} {self(badge_code, f'{badge:<10}')} {details}"
+
+
+def render_event(e: dict, when: str, p: Painter) -> str | None:
+    kind, who = e.get("kind"), e.get("agent", "?")
+    where = f"{e.get('pair', '')} · {HORIZONS.get(e.get('horizon'), e.get('horizon', ''))}"
+    if kind == "posted":
+        return p.row(when, who, "NEW CALL", WHITE, f"{where} · sealed until {local(e['closes'])}")
+    if kind == "scored":
+        result = e.get("result")
+        if result == "void":
+            return p.row(when, who, "– VOID", GRAY, f"{where} · no price could be found, not scored")
+        said = f"said {'UP' if e['direction'] == 'long' else 'DOWN'}, {e['confidence'] * 100:.0f}% sure"
+        moved = f"{money(e['start'])} → {money(e['end'])}"
+        if result == "flat":
+            return p.row(when, who, "– FLAT", GRAY, f"{where} · {said} · {moved} · barely moved, not scored")
+        badge, code = ("✔ RIGHT", GREEN + BOLD) if result == "right" else ("✘ WRONG", RED + BOLD)
+        credit = p(GREEN if e["credit"] >= 0 else RED, f"{e['credit']:+.2f} credits")
+        return p.row(when, who, badge, code, f"{where} · {said} · {moved} · {credit}")
+    if kind == "read":
+        verdict = VERDICTS.get(e.get("verdict"), e.get("verdict") or "")
+        cost = f"{e['cost']:g} credit{'s' if e['cost'] != 1 else ''}"
+        return p.row(when, who, "READ", WHITE,
+                     f"paid {cost} for {display(e['author'])}'s {where} call ({verdict}) · {e['left']:g} left")
+    if kind == "delisted":
+        return p.row(when, who, "DELISTED", RED + BOLD, "skill fell below the line over its last 90 calls; it can post its way back")
+    if kind == "retired":
+        return p.row(when, who, "RETIRED", RED + BOLD, "delisted three times in a year; this wallet is done")
+    if kind == "reinstated":
+        return p.row(when, who, "BACK", GREEN + BOLD, "earned its way back with 30 fresh calls above a coin flip")
+    return None
 
 
 def render(line: str, color: bool = True) -> str | None:
-    """One log line in, one feed line out (or None to hide it)."""
+    """One log line in, one readable line out, or None to hide it."""
+    p = Painter(color)
     line = line.rstrip("\n")
-    if NOISE.search(line):
-        return None
     m = LINE.match(line)
     if not m:
-        # Tracebacks and uvicorn's own lines have no timestamp: errors stay loud, the rest goes dim.
-        if re.search(r"Traceback|Error|Exception|failed", line):
-            return f"{RED}{line}{RESET}" if color else line
-        return f"{GRAY}{line}{RESET}" if color else line
-    clock, level, logger, msg = m.groups()
-    s = SCORED.match(msg)
-    if s:
-        author, call, result, tail = s.groups()
-        who = who_of(logger, author)
-        mark = {"right": GREEN + BOLD, "wrong": RED + BOLD, "flat": GRAY, "void": GRAY}[result]
-        body = f"{call}= {mark}{result.upper()}{RESET}{tail}" if color else f"{call}= {result.upper()}{tail}"
-        tag = paint(who, f"{who:>9}", color)
-        return f"{GRAY if color else ''}{clock}{RESET if color else ''} {tag} {'│' if color else '|'} scored {body}"
-    who = who_of(logger)
-    if msg.startswith("tick "):
-        msg = msg.replace("tick ", "scoring tick ")
-    if level in ("WARNING",):
-        msg = f"{YELLOW}{msg}{RESET}" if color else msg
-    elif level in ("ERROR", "CRITICAL"):
-        msg = f"{RED}{BOLD}{msg}{RESET}" if color else msg
-    tag = paint(who, f"{who:>9}", color)
-    sep = "│" if color else "|"
-    return f"{GRAY if color else ''}{clock}{RESET if color else ''} {tag} {sep} {msg}"
+        if HIDE.search(line):
+            return None
+        if re.search(r"Traceback|Error|Exception", line):
+            return p(RED, f"  {line}")
+        return p(GRAY, f"  {line}")
+    hour, minute, level, logger, msg = m.groups()
+    when = clock(int(hour), int(minute))
+    if msg.startswith("EVENT "):
+        try:
+            return render_event(json.loads(msg[6:]), when, p)
+        except (ValueError, KeyError, TypeError):
+            return None
+    who = next((v for k, v in LOGGER_NAMES.items() if logger.startswith(k)), logger.split(".")[-1])
+    gap = re.match(r"gap of (\d+)s since last tick", msg)
+    if gap:
+        mins = int(gap.group(1)) // 60
+        span = f"{mins} min" if mins < 90 else f"{mins / 60:.0f} hours"
+        return p.row(when, "Room", "⚠ ASLEEP", YELLOW, f"the laptop was asleep or off for about {span}; missed prices get rebuilt from the exchanges")
+    if HIDE.search(msg):
+        return None
+    if "running as" in msg or "adapter watching" in msg:
+        return p.row(when, who, "ONLINE", GRAY, p(GRAY, "watching Kakalshi's paper bets" if "watching" in msg else "connected to the room"))
+    candle = re.match(r"(BTC|ETH|SOL|XRP): candle fetch failed: (.*)", msg)
+    if candle:
+        return p.row(when, who, "⚠ SKIPPED", YELLOW, f"couldn't get {candle.group(1)}'s last hour from Coinbase ({candle.group(2)}); no {candle.group(1)} call this round")
+    if level == "WARNING":
+        return p.row(when, who, "⚠ WARNING", YELLOW, msg)
+    if level in ("ERROR", "CRITICAL"):
+        return p.row(when, who, "✘ ERROR", RED + BOLD, msg)
+    return p.row(when, who, "", GRAY, p(GRAY, msg))
+
+
+def scoreboard(color: bool = True) -> list[str]:
+    """Every bot's standing in one short block, from the database."""
+    from . import service
+    from .db import Agent, Read, SessionLocal, Signal
+
+    p = Painter(color)
+    db = SessionLocal()
+    try:
+        title = f" Scoreboard · {dt.datetime.now().strftime('%I:%M %p').lstrip('0')} "
+        out = ["", p(BOLD, f"──{title}" + "─" * max(4, 70 - len(title)))]
+        for a in db.query(Agent).order_by(Agent.created_at).all():
+            name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
+            if db.query(Signal).filter(Signal.agent_id == a.id).count():
+                r = service.public_agent(db, a, None, "90d")
+                if r["n"] == 0:
+                    out.append(f"  {name} {'Unproven':<18} nothing scored yet")
+                    continue
+                verdict = VERDICTS.get(r["verdict"], r["verdict"])
+                code = {"proven": GREEN, "probably_not_luck": GREEN, "worse_than_chance": RED,
+                        "delisted": RED, "retired": RED}.get(r["verdict"], WHITE)
+                nxt = ""
+                if r.get("days_to_next") is not None and r["verdict"] != "unproven":
+                    nxt = f" · next step in ~{r['days_to_next']:g} days"
+                out.append(f"  {name} {p(code, f'{verdict:<18}')} {r['hit_rate'] * 100:>3.0f}% right · skill {r['skill_points']:+d}"
+                           f" · {r['n']} scored{nxt}")
+                continue
+            reads = db.query(Signal.result).join(Read, Read.signal_id == Signal.id).filter(
+                Read.agent_id == a.id, Signal.agent_id != a.id).all()
+            if reads:
+                done = [x[0] for x in reads if x[0] in ("right", "wrong")]
+                out.append(f"  {name} {'Reader':<18} {len(reads)} paid reads · {done.count('right')} of {len(done)} closed were right"
+                           f" · {service.balance(db, a.id):g} credits left")
+        out.append(p(GRAY, "  Verdicts: Unproven → Luck → Probably not luck → Proven.  Skill 0 = a coin flip."))
+        out.append(p(BOLD, "─" * 72))
+        out.append("")
+        return out
+    finally:
+        db.close()
+
+
+BOARD_EVERY_SECONDS = 1800
+ROUND_DONE = re.compile(r"tick \{.*'resolved': [1-9]")
 
 
 def main() -> None:
     color = sys.stdout.isatty()
+    last_board = 0.0
+
+    def board():
+        nonlocal last_board
+        try:
+            print("\n".join(scoreboard(color)), flush=True)
+        except Exception as e:  # the feed must never die because the scoreboard could not be drawn
+            print(Painter(color)(YELLOW, f"  (scoreboard unavailable: {e})"), flush=True)
+        last_board = time.monotonic()
+
+    board()
     for line in sys.stdin:
         out = render(line, color)
         if out is not None:
             print(out, flush=True)
+        # The scheduler's tick line comes after a whole round of scoring: show the board then.
+        if ROUND_DONE.search(line) and time.monotonic() - last_board >= BOARD_EVERY_SECONDS:
+            board()
 
 
 if __name__ == "__main__":
