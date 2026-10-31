@@ -87,7 +87,7 @@ def test_checking_constantly_cannot_manufacture_skill():
     assert fooled_old / runs > 0.15          # the problem the betting test fixes
 
 
-def test_record_uses_batches_for_luck_and_evidence():
+def test_record_uses_batches_for_luck_and_verdict():
     # 12 right in 3 batches of 4: hit rate and skill unchanged, luck odds and evidence honest.
     briers, results = [0.04] * 12, ["right"] * 12
     alone = scoring.record(briers, results, [0.0] * 12)
@@ -95,7 +95,7 @@ def test_record_uses_batches_for_luck_and_evidence():
     assert alone.hit_rate == batched.hit_rate == 1.0 and alone.bss == batched.bss
     assert alone.p_luck == pytest.approx(1 / 44.358, rel=1e-3) and alone.tries == 12
     assert batched.p_luck == pytest.approx(1 / 2.275, rel=1e-5) and batched.tries == 3
-    assert batched.evidence == "insufficient"          # 3 tries, under 10
+    assert batched.verdict == "unproven"               # 3 tries, under 10
 
 
 def test_batching_only_ever_widens_the_ranges():

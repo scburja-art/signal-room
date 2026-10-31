@@ -1,7 +1,6 @@
 """A signal that comes due while the sampler was asleep is scored from exchange candles, not voided."""
 import datetime as dt
 
-import pytest
 
 from signal_room import config, prices, service
 from signal_room.db import AuditEvent, ReferencePrice, Signal

@@ -199,38 +199,59 @@ def _resolved_query(db: Session, agent_id: str, horizon: str | None, since: dt.d
     return q.order_by(Signal.resolved_at)
 
 
-def _record(rows: list[Signal]) -> scoring.Record:
+def _record(rows: list[Signal], slices: int = 1, now: dt.datetime | None = None) -> dict:
     clusters = scoring.cluster_ids([s.submitted_at for s in rows], config.BATCH_WINDOW_SECONDS)
-    return scoring.record([s.brier for s in rows], [s.result for s in rows],
-                          [s.net_return for s in rows if s.net_return is not None], clusters)
+    rec = scoring.record([s.brier for s in rows], [s.result for s in rows],
+                         [s.net_return for s in rows if s.net_return is not None], clusters, slices)
+    out = rec.__dict__.copy()
+    # Tries per day so far turns the projected tries into days.
+    out["days_to_next"] = None
+    if rec.tries_to_next is not None and rows:
+        span_days = max(1.0, ((now or utcnow()) - min(s.submitted_at for s in rows)).total_seconds() / 86400)
+        out["days_to_next"] = round(rec.tries_to_next / (rec.tries / span_days), 1) if rec.tries else None
+    return out
+
+
+def _since(window: str) -> dt.datetime | None:
+    days = {"30d": 30, "90d": 90}.get(window)
+    return utcnow() - dt.timedelta(days=days) if days else None
+
+
+def _slices(db: Session, agent_id: str, since: dt.datetime | None, horizon: str | None, pair: str | None) -> int:
+    """How many slices this view is one of: horizons the agent uses when filtered by horizon, times
+    coins when filtered by coin."""
+    def distinct(col) -> int:
+        q = db.query(func.count(func.distinct(col))).filter(Signal.agent_id == agent_id, Signal.result.in_(("right", "wrong")))
+        if since:
+            q = q.filter(Signal.resolved_at >= since)
+        return max(1, q.scalar() or 1)
+    return (distinct(Signal.horizon) if horizon else 1) * (distinct(Signal.pair) if pair else 1)
 
 
 def agent_record(db: Session, agent_id: str, horizon: str | None = None, window: str = "90d") -> dict:
-    since = {"30d": 30, "90d": 90}.get(window)
-    since_dt = utcnow() - dt.timedelta(days=since) if since else None
-    rows = _resolved_query(db, agent_id, horizon, since_dt).all()
-    rec = _record(rows)
-    return {"horizon": horizon or "all", "window": window, **rec.__dict__}
+    since = _since(window)
+    rows = _resolved_query(db, agent_id, horizon, since).all()
+    return {"horizon": horizon or "all", "window": window, **_record(rows, _slices(db, agent_id, since, horizon, None))}
 
 
 def public_agent(db: Session, agent: Agent, horizon: str | None, window: str) -> dict:
     rec = agent_record(db, agent.id, horizon, window)
+    if agent.status != "active":
+        rec["verdict"] = agent.status   # delisted or retired outranks anything the record says
     return {"agent_id": agent.id, "name": agent.name, "status": agent.status, "since": agent.created_at.isoformat(), **rec}
 
 
 def leaderboard(db: Session, horizon: str | None, pair: str | None, window: str, limit: int = 100) -> list[dict]:
     agents = db.query(Agent).filter(Agent.status == "active").all()
+    since = _since(window)
     out = []
     for a in agents:
-        since = {"30d": 30, "90d": 90}.get(window)
-        since_dt = utcnow() - dt.timedelta(days=since) if since else None
-        q = _resolved_query(db, a.id, horizon, since_dt)
+        q = _resolved_query(db, a.id, horizon, since)
         if pair:
             q = q.filter(Signal.pair == pair)
-        rows = q.all()
-        rec = _record(rows)
-        if rec.ranked:
-            out.append({"agent_id": a.id, "name": a.name, **rec.__dict__})
+        rec = _record(q.all(), _slices(db, a.id, since, horizon, pair))
+        if rec["ranked"]:
+            out.append({"agent_id": a.id, "name": a.name, **rec})
     out.sort(key=lambda r: r["score"], reverse=True)
     for i, r in enumerate(out, 1):
         r["rank"] = i
@@ -259,6 +280,7 @@ def room_listing(db: Session, pair: str | None, horizon: str | None, limit: int 
             "pair": s.pair, "horizon": s.horizon, "submitted_at": s.submitted_at.isoformat(),
             "resolve_at": s.resolve_at.isoformat(), "hash": s.hash,
             "agent_score": rec["score"], "agent_ranked": rec["ranked"], "agent_n": rec["n"],
+            "agent_verdict": rec["verdict"],
         })
     return out
 

@@ -44,36 +44,57 @@ def luck(p: float) -> str:
     return f"about 1 in {round(1 / p):,}"
 
 
-EVIDENCE_WORDS = {
-    "insufficient": "too few signals to say anything",
-    "none": "could easily be luck",
-    "suggestive": "probably not luck, but not proven",
-    "strong": "very unlikely to be luck",
+VERDICT_WORDS = {
+    "unproven": "Unproven",
+    "luck": "Luck",
+    "probably_not_luck": "Probably not luck",
+    "proven": "Proven",
+    "worse_than_chance": "Worse than chance",
+    "delisted": "Delisted",
+    "retired": "Retired",
 }
+
+
+def headline(rec: dict) -> str:
+    """'Luck · right 60% (43–74%) · skill +8'"""
+    return (f"{VERDICT_WORDS[rec['verdict']]} · right {pct(rec['hit_rate'])} ({pct(rec['hit_rate_low'])}–{pct(rec['hit_rate_high'])})"
+            f" · skill {rec['skill_points']:+d}")
+
+
+def progress(rec: dict) -> str:
+    nxt = rec.get("next_verdict")
+    if nxt is None:
+        return ""
+    if rec["tries_to_next"] is None:
+        return f"next step ({VERDICT_WORDS[nxt]}): not heading there at this record"
+    days = f", about {rec['days_to_next']:g} days at this pace" if rec.get("days_to_next") is not None else ""
+    return (f"next step ({VERDICT_WORDS[nxt]}): about {rec['tries_to_next']:,} more tries{days},"
+            " if the next stretch looks like the record so far")
 
 
 def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
     rows = db.query(Signal).filter(Signal.agent_id == a.id).all()
     open_ = [s for s in rows if s.resolved_at is None]
     void = [s for s in rows if s.result == "void"]
-    rec = service.agent_record(db, a.id, None, "90d")
-    status = a.status if a.status != "active" else "active"
-    head = f"{a.name or a.id}  ({status}"
+    rec = service.public_agent(db, a, None, "90d")
+    head = f"{a.name or a.id}  ({a.status}"
     if a.delist_count:
         head += f", delisted {a.delist_count}x in 12 months"
-    head += ")"
-    out = [head]
-    out.append(f"    scored {rec['n']}, flat {rec['flats']}, open {len(open_)}, voided {len(void)}, credits {service.balance(db, a.id):.1f}")
+    out = [head + ")"]
     if rec["n"] == 0:
-        out.append("    nothing scored yet")
+        out.append(f"    nothing scored yet; open {len(open_)}")
         return out
-    out.append(f"    right {pct(rec['hit_rate'])} of the time (95% range {pct(rec['hit_rate_low'])}–{pct(rec['hit_rate_high'])});"
-               f" a coin-flipper does this well {luck(rec['p_luck'])} ({rec['tries']} separate tries; calls made together count once)")
-    out.append(f"    skill {signed(rec['bss'])} (range {signed(rec['bss_low'])} to {signed(rec['bss_high'])}): {EVIDENCE_WORDS[rec['evidence']]}")
-    if rec["ranked"]:
-        out.append(f"    leaderboard score {signed(rec['score'], 3)}")
+    out.append("    " + headline(rec))
+    if rec["verdict"] == "worse_than_chance":
+        odds = f"a coin-flipper does this badly {luck(rec['p_worse'])}"
     else:
+        odds = f"a coin-flipper does this well {luck(rec['p_luck'])}"
+    out.append(f"    {odds}, over {rec['tries']} separate tries (calls made together count once)")
+    if not rec["ranked"]:
         out.append(f"    needs {config.MIN_RESOLVED_FOR_RANK - rec['n']} more scored signals to be ranked")
+    if progress(rec):
+        out.append("    " + progress(rec))
+    out.append(f"    scored {rec['n']}, flat {rec['flats']}, open {len(open_)}, voided {len(void)}, credits {service.balance(db, a.id):.1f}")
     out.append(f"    if traded 1:1 at {config.ROUND_TRIP_COST * 100:.2f}% cost per trade: {signed(rec['cum_return'] * 100)}% total,"
                f" worst dip {rec['max_drawdown'] * 100:.1f}%")
 
@@ -92,9 +113,10 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
         if s.resolved_at and s.resolved_at >= day_ago:
             recent[1] += 1
             recent[0] += s.result == "right"
-    out.append("    by pair: " + ", ".join(f"{p} {r}/{n}" for p, (r, n) in sorted(by_pair.items())))
+    out.append("    slices, exploratory (not verdicts; each one faces a higher bar):")
+    out.append("      by coin: " + ", ".join(f"{p} {r}/{n}" for p, (r, n) in sorted(by_pair.items())))
     if len(by_hz) > 1:
-        out.append("    by horizon: " + ", ".join(f"{h} {r}/{n}" for h, (r, n) in sorted(by_hz.items())))
+        out.append("      by window: " + ", ".join(f"{h} {r}/{n}" for h, (r, n) in sorted(by_hz.items())))
     out.append(f"    last 24h: {recent[0]}/{recent[1]} right" if recent[1] else "    last 24h: nothing scored")
     return out
 
@@ -122,7 +144,7 @@ def report(db) -> str:
     lines.append("Leaderboard (90-day window, ranked agents only):")
     if board:
         for r in board:
-            lines.append(f"  {r['rank']}. {r['name']}  score {signed(r['score'], 3)}  ({r['n']} scored, {pct(r['hit_rate'])} right, {EVIDENCE_WORDS[r['evidence']]})")
+            lines.append(f"  {r['rank']}. {r['name']}  {headline(r)}  ({r['n']} scored, {r['tries']} tries)")
     else:
         lines.append(f"  nobody ranked yet (needs {config.MIN_RESOLVED_FOR_RANK} scored signals)")
     lines.append("")

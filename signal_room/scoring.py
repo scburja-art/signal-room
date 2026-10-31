@@ -174,15 +174,54 @@ def bss_interval(briers: list[float], z: float = 1.96, deff: float = 1.0) -> tup
     return 1.0 - (mean + z * se) / COIN_FLIP_BS, 1.0 - (mean - z * se) / COIN_FLIP_BS
 
 
-def evidence(n: int, p: float) -> str:
-    """One word for how much the record proves. Thresholds are conventional, not tuned."""
-    if n < 10:
-        return "insufficient"
-    if p < 0.001:
-        return "strong"
-    if p < 0.05:
-        return "suggestive"
-    return "none"
+MIN_TRIES = 10   # separate tries before any verdict but "unproven"
+
+# The verdict ladder. Earned only by the math; nothing else moves an agent up it.
+LADDER = {
+    "probably_not_luck": 0.05,   # luck odds under 1 in 20
+    "proven": 0.001,             # luck odds under 1 in 1,000
+}
+
+
+def verdict(n: int, tries: int, p: float, p_worse: float) -> str:
+    """unproven | worse_than_chance | luck | probably_not_luck | proven. Thresholds are
+    conventional, fixed in advance, never tuned to the data."""
+    if n < config.MIN_RESOLVED_FOR_RANK or tries < MIN_TRIES:
+        return "unproven"
+    if p_worse < LADDER["probably_not_luck"]:
+        return "worse_than_chance"
+    if p < LADDER["proven"]:
+        return "proven"
+    if p < LADDER["probably_not_luck"]:
+        return "probably_not_luck"
+    return "luck"
+
+
+NEXT_STEP = {"unproven": "probably_not_luck", "luck": "probably_not_luck", "probably_not_luck": "proven"}
+
+
+def tries_to_reach(batches: list[tuple[int, int]], target_p: float, cap: int = 20000) -> int | None:
+    """How many more tries until the luck odds drop under target_p, if the next stretch looks like
+    the record so far (history replayed in a loop). None when the record is not heading there."""
+    if not batches:
+        return None
+    xs = [(2 * r - n) / n for r, n in batches]
+    logs = [sum(math.log1p(lam * x) for x in xs) for lam in STAKES]   # today, and the gain per replay
+    if max(logs) <= 0:
+        return None
+    goal = math.log(1 / target_p)
+
+    def log_mean(v):
+        top = max(v)
+        return top + math.log(sum(math.exp(u - top) for u in v) / len(v))
+    if log_mean(logs) >= goal:
+        return 0
+    for step in range(1, cap + 1):
+        x = xs[(step - 1) % len(xs)]
+        logs = [v + math.log1p(lam * x) for v, lam in zip(logs, STAKES)]
+        if log_mean(logs) >= goal:
+            return step
+    return None
 
 
 @dataclass
@@ -203,17 +242,24 @@ class Record:
     hit_rate_high: float = 1.0
     bss_low: float = -1.0
     bss_high: float = 1.0
-    evidence: str = "insufficient"
     tries: int = 0       # independent tries: calls posted together count once
     p_worse: float = 1.0  # the same test the other way: chance a coin flip does this badly
+    verdict: str = "unproven"
+    skill_points: int = 0          # skill on a readable scale: BSS x 100, 0 = coin flip
+    next_verdict: str | None = None
+    tries_to_next: int | None = None   # projection, if the next stretch looks like the record so far
+    exploratory: bool = False      # a slice (one coin or one time window): the bar is raised per slice
 
 
 def record(briers: list[float | None], results: list[str], returns: list[float],
-           clusters: list | None = None) -> Record:
+           clusters: list | None = None, slices: int = 1) -> Record:
     """briers/results/clusters are parallel lists over resolved signals; returns covers those with
     a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved under
     rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
-    clusters: batch id per signal (see cluster_ids); None treats every call as independent."""
+    clusters: batch id per signal (see cluster_ids); None treats every call as independent.
+    slices: how many slices of the agent's record this one is one of (e.g. 4 coins). Looking at many
+    slices and keeping the best is how a lucky slice gets mistaken for skill, so the luck odds are
+    multiplied by the number of slices (Bonferroni) and the record is marked exploratory."""
     keep = [i for i, r in enumerate(results) if r in ("right", "wrong")]
     scored_b = [briers[i] for i in keep]
     hits = [1 if results[i] == "right" else 0 for i in keep]
@@ -239,16 +285,21 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
             sharpe = mean / sd * math.sqrt(len(returns))
     batches = _batches(hits, cl)
     p, p_worse = luck_odds(batches)
+    p, p_worse = min(1.0, p * slices), min(1.0, p_worse * slices)
     n_eff = n / design_effect([float(h) for h in hits], cl) if n else 0.0
     hlo, hhi = wilson_interval(hit * n_eff, n_eff)
     blo, bhi = bss_interval(scored_b, deff=design_effect(scored_b, cl))
+    v = verdict(n, len(batches), p, p_worse)
+    nxt = NEXT_STEP.get(v)
     return Record(
         n=n, flats=flats, bss=round(bss, 4), score=round(shrink(bss, n), 4),
         ranked=n >= config.MIN_RESOLVED_FOR_RANK, hit_rate=round(hit, 4),
         cum_return=round(cum - 1.0, 6), sharpe=round(sharpe, 4), max_drawdown=round(mdd, 6),
         p_luck=round(p, 6), hit_rate_low=round(hlo, 4), hit_rate_high=round(hhi, 4),
-        bss_low=round(blo, 4), bss_high=round(bhi, 4), evidence=evidence(len(batches), p),
-        tries=len(batches), p_worse=round(p_worse, 6),
+        bss_low=round(blo, 4), bss_high=round(bhi, 4),
+        tries=len(batches), p_worse=round(p_worse, 6), verdict=v, skill_points=round(bss * 100),
+        next_verdict=nxt, tries_to_next=tries_to_reach(batches, LADDER[nxt] / slices) if nxt else None,
+        exploratory=slices > 1,
     )
 
 

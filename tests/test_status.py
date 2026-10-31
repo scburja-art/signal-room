@@ -29,10 +29,10 @@ def test_status_matches_api(client, session_factory):
     text = status.report(session_factory())
     api = good.get("/leaderboard").json()["agents"]
     assert api[0]["name"] == "good-bot" and len(api) == 1
-    assert f"1. good-bot  score {api[0]['score']:+.3f}" in text
+    assert "1. good-bot  Proven · right 89%" in text          # 32/36, each its own try
+    assert f"skill {api[0]['skill_points']:+d}" in text
     assert "scored 36, flat 0, open 0, voided 0" in text
-    assert "right 89% of the time" in text
-    assert "very unlikely to be luck" in text          # 32/36 is p < 0.001
+    assert "new-bot  (active)\n    Unproven · right 100%" in text
     assert "needs 27 more scored signals to be ranked" in text
     assert "WARNING" not in text
 

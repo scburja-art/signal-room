@@ -17,11 +17,33 @@ def test_wilson_interval_behaves():
     assert scoring.wilson_interval(0, 0) == (0.0, 1.0)
 
 
-def test_evidence_labels():
-    assert scoring.evidence(5, 0.0001) == "insufficient"   # too few signals whatever the p
-    assert scoring.evidence(25, 0.02) == "suggestive"
-    assert scoring.evidence(100, 0.00001) == "strong"
-    assert scoring.evidence(100, 0.3) == "none"
+def test_verdict_ladder():
+    v = scoring.verdict
+    assert v(29, 29, 0.0001, 1.0) == "unproven"            # under 30 scored, whatever the odds
+    assert v(40, 9, 0.0001, 1.0) == "unproven"             # under 10 separate tries
+    assert v(40, 40, 0.0005, 1.0) == "proven"
+    assert v(40, 40, 0.01, 1.0) == "probably_not_luck"
+    assert v(40, 40, 0.30, 1.0) == "luck"
+    assert v(40, 40, 0.90, 0.01) == "worse_than_chance"
+
+
+def test_progress_projection_hand_values():
+    # Every try right, one so far. Bankroll after k: mean((1+s)^k). k=9 → 77.2/5 = 15.4 (< 20);
+    # k=10 → 109.2/5 = 21.8 (>= 20). So 9 more tries to get under 1 in 20.
+    assert scoring.tries_to_reach([(1, 1)], 0.05) == 9
+    # Right then wrong, replayed: each pair multiplies by (1-s^2) < 1. Never gets there.
+    assert scoring.tries_to_reach([(1, 1), (0, 1)], 0.05) is None
+    assert scoring.tries_to_reach([], 0.05) is None
+
+
+def test_slices_raise_the_bar():
+    briers = [0.04] * 30 + [0.64] * 10
+    results = ["right"] * 30 + ["wrong"] * 10
+    whole = scoring.record(briers, results, [0.0] * 40)
+    one_of_four = scoring.record(briers, results, [0.0] * 40, slices=4)
+    assert one_of_four.p_luck == pytest.approx(min(1.0, whole.p_luck * 4), rel=1e-4)
+    assert one_of_four.exploratory and not whole.exploratory
+    assert one_of_four.hit_rate == whole.hit_rate and one_of_four.bss == whole.bss
 
 
 def test_record_carries_uncertainty():
@@ -33,10 +55,10 @@ def test_record_carries_uncertainty():
     stakes = (0.1, 0.2, 0.3, 0.4, 0.5)
     bankroll = sum((1 + s) ** 18 * (1 - s) ** 7 for s in stakes) / 5
     assert rec.p_luck == pytest.approx(1 / bankroll, rel=1e-4) and 0.11 < rec.p_luck < 0.13
-    assert rec.evidence == "none"
+    assert rec.verdict == "unproven"                       # also under 30 scored
     assert rec.bss_low < rec.bss < rec.bss_high
     lucky = scoring.record([0.04] * 4, ["right"] * 4, [0.0] * 4)
-    assert lucky.evidence == "insufficient" and lucky.hit_rate == 1.0
+    assert lucky.verdict == "unproven" and lucky.hit_rate == 1.0
 
 
 def test_scoring_version_stamped_and_history_kept(client, session_factory, monkeypatch):
@@ -59,7 +81,7 @@ def test_scoring_version_stamped_and_history_kept(client, session_factory, monke
     assert sig.credit == old_credit and sig.scoring_version == scoring.SCORING_VERSION - 1
     me = a.get("/me").json()
     assert me["signals"][0]["scoring_version"] == scoring.SCORING_VERSION - 1
-    assert "p_luck" in me["records"]["15m"] and "evidence" in me["all_time"]
+    assert "p_luck" in me["records"]["15m"] and "verdict" in me["all_time"]
     s.close()
 
 
