@@ -64,6 +64,11 @@ case "${1:-serve}" in
       echo "The server did not start. Last lines of logs/server.log:"; tail -20 logs/server.log; exit 1
     fi
     echo "Server up on port $PORT."
+    # The viewer starts before the agents so their first lines show. It runs in the background and the
+    # script waits on it, so Ctrl+C reaches stop_all at once.
+    touch logs/agent-momentum.log logs/agent-meanrev.log logs/agent-reader.log logs/agent-kakalshi.log
+    tail -n 0 -F logs/server.log logs/agent-*.log 2>/dev/null | ./venv/bin/python -u -m signal_room.feed &
+    FEED=$!
     for agent in momentum meanrev reader; do
       ./venv/bin/python -m agents.run "$agent" >> "logs/agent-$agent.log" 2>&1 &
       PIDS+=($!)
@@ -78,10 +83,7 @@ case "${1:-serve}" in
     fi
     echo "Showing what matters (new calls, scoring, problems). Ctrl+C stops everything."
     echo
-    # The viewer runs in the background and the script waits on it, so Ctrl+C reaches stop_all at once.
-    tail -n 0 -F logs/server.log logs/agent-*.log 2>/dev/null \
-      | grep --line-buffered -vE "still pending|already pending|HTTP/1.1\" [234][0-9][0-9] |'resolved': 0\}|^==> |^$" &
-    wait $!
+    wait "$FEED"
     ;;
   status)
     exec ./venv/bin/python -m signal_room.status

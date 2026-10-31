@@ -133,6 +133,8 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
             sig.result, sig.resolved_at, sig.credit = "void", now, 0.0
             db.add(AuditEvent(agent_id=sig.agent_id, event="signal_void", detail=sig.id))
             db.commit()
+            author = db.get(Agent, sig.agent_id)
+            log.info("scored %s %s %s = void (no price could be had)", author.name if author else sig.agent_id, sig.pair, sig.horizon)
             return True
     body = unseal(sig.agent_id, sig.body_cipher)
     direction, confidence = body["direction"], float(body["confidence"])
@@ -152,6 +154,11 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
     if sig.credit != 0:
         db.add(CreditEntry(agent_id=sig.agent_id, amount=sig.credit, reason="resolved", signal_id=sig.id))
     db.commit()
+    # After resolution the call is public record, so the local log may show it.
+    author = db.get(Agent, sig.agent_id)
+    log.info("scored %s %s %s %s at %.0f%%: %g -> %g = %s (credit %+.2f)",
+             author.name if author else sig.agent_id, sig.pair, sig.horizon, direction, confidence * 100,
+             sig.price_at_submit, ref.price, result, sig.credit)
     return True
 
 
