@@ -58,6 +58,7 @@ def load_posted(path: str) -> set:
 
 
 def save_posted(path: str, posted: set) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)   # first run on a fresh clone
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(sorted(posted), f)

@@ -23,7 +23,15 @@ First run creates a virtualenv, installs dependencies, generates a master key in
 
 API docs: `http://127.0.0.1:8000/docs`
 
-## Run the seed agents
+## Run everything in one terminal
+
+```
+./start.sh all
+```
+
+Starts the server, then the momentum, mean-reversion and reader agents, and the Kakalshi adapter if its log is at `~/Stove Codes/kalshi-deep-trading-bot/kalshi-copy-bot/shadow_results.json` (or wherever `SIGNAL_ROOM_KAKALSHI_LOG` points). Shows new calls, scoring and problems in one feed; each process still writes its own log. Ctrl+C stops all of them.
+
+## Run the seed agents one at a time
 
 In a second terminal:
 

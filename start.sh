@@ -39,6 +39,50 @@ case "${1:-serve}" in
     shift
     ./venv/bin/python -m agents.run "$@" 2>&1 | tee -a "logs/agent-${1:-unknown}.log"
     ;;
+  all)
+    # Server plus every seed agent in this one terminal. Each still writes its own log in logs/.
+    # Ctrl+C stops all of them together. Kakalshi itself runs in its own window (its own program).
+    KAKALSHI_LOG="${SIGNAL_ROOM_KAKALSHI_LOG:-$HOME/Stove Codes/kalshi-deep-trading-bot/kalshi-copy-bot/shadow_results.json}"
+    PIDS=()
+    stop_all() {
+      trap - INT TERM EXIT
+      echo; echo "Stopping everything..."
+      kill "${PIDS[@]}" 2>/dev/null
+      pkill -P $$ 2>/dev/null   # the log viewer too
+      wait 2>/dev/null
+      echo "Stopped."
+    }
+    trap stop_all INT TERM EXIT
+    ./venv/bin/python -m signal_room.main >> logs/server.log 2>&1 &
+    PIDS+=($!)
+    PORT="${SIGNAL_ROOM_PORT:-8000}"
+    for _ in $(seq 1 30); do
+      curl -s "http://127.0.0.1:$PORT/health" > /dev/null 2>&1 && break
+      sleep 1
+    done
+    if ! curl -s "http://127.0.0.1:$PORT/health" > /dev/null 2>&1; then
+      echo "The server did not start. Last lines of logs/server.log:"; tail -20 logs/server.log; exit 1
+    fi
+    echo "Server up on port $PORT."
+    for agent in momentum meanrev reader; do
+      ./venv/bin/python -m agents.run "$agent" >> "logs/agent-$agent.log" 2>&1 &
+      PIDS+=($!)
+      echo "Started $agent."
+    done
+    if [ -f "$KAKALSHI_LOG" ]; then
+      ./venv/bin/python -m agents.run kakalshi "$KAKALSHI_LOG" >> logs/agent-kakalshi.log 2>&1 &
+      PIDS+=($!)
+      echo "Started kakalshi adapter."
+    else
+      echo "Kakalshi log not found at $KAKALSHI_LOG; adapter not started."
+    fi
+    echo "Showing what matters (new calls, scoring, problems). Ctrl+C stops everything."
+    echo
+    # The viewer runs in the background and the script waits on it, so Ctrl+C reaches stop_all at once.
+    tail -n 0 -F logs/server.log logs/agent-*.log 2>/dev/null \
+      | grep --line-buffered -vE "still pending|already pending|HTTP/1.1\" [234][0-9][0-9] |'resolved': 0\}|^==> |^$" &
+    wait $!
+    ;;
   status)
     exec ./venv/bin/python -m signal_room.status
     ;;
@@ -46,7 +90,7 @@ case "${1:-serve}" in
     exec ./venv/bin/python -m pytest -q tests
     ;;
   *)
-    echo "usage: ./start.sh [serve | agent <momentum|meanrev|reader|kakalshi> [args] | status | test]"
+    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|reader|kakalshi> [args] | status | test]"
     exit 1
     ;;
 esac
