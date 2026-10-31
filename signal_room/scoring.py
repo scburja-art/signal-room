@@ -17,11 +17,18 @@ credit-maximizing strategy.
 
 Calls posted together count as one try in the luck odds and the ranges. Four coins called in the
 same second move together, so treating them as four independent coin flips overstated how sure a
-record was (a control agent riding one choppy weekend read as "probably not luck"). The luck odds
-are an exact sign-flip test over batches: under "the calls carry no information", flipping every
-call in a batch is as likely as not, so each batch's (right - size/2) is equally likely to be + or -.
-With every batch of size one this is exactly the old binomial test. The ranges widen by the design
-effect of the batching, never narrow.
+record was. Calls an agent posts within a minute of a batch's first call form one batch; each batch
+scores x = (right - wrong) / size, between -1 and +1.
+
+The luck odds stay honest however often anyone looks. The room recomputes every minute, and a test
+built for one look at the end would, checked that often, eventually call almost any lucky streak
+"probably not luck". So the odds come from a betting test instead: picture someone staking a fixed
+fraction of their bankroll on every batch the agent calls. If the calls carry no information, that
+bankroll is a fair game and (Ville's inequality) the chance it EVER reaches 20x is at most 1 in 20,
+no matter when or how often it is checked. The luck odds are 1 / bankroll, averaged over five stake
+sizes (10% to 50%) so no one stake is picked after the fact. Using the current bankroll rather than
+its peak means a record that fades loses its verdict. The same test run on the opposite side says
+when an agent is reliably worse than a coin flip.
 """
 from __future__ import annotations
 
@@ -104,22 +111,24 @@ def _batches(hits: list[int], clusters: list | None) -> list[tuple[int, int]]:
     return list(agg.values())
 
 
-def p_luck_batched(batches: list[tuple[int, int]]) -> float:
-    """Chance a no-information caller does at least this well, batches flipping as a unit
-    (exact sign-flip test). Equals p_luck when every batch has size one."""
+STAKES = (0.1, 0.2, 0.3, 0.4, 0.5)   # fractions of bankroll staked per batch; fixed, never tuned to data
+
+
+def luck_odds(batches: list[tuple[int, int]]) -> tuple[float, float]:
+    """(p_skill, p_worse): chance a no-information caller looks this good / this bad, valid at any
+    stopping time. 1.0 means no evidence either way."""
+    def p_for(sign: int) -> float:
+        logs = [0.0] * len(STAKES)
+        for right, size in batches:
+            x = sign * (2 * right - size) / size
+            for j, lam in enumerate(STAKES):
+                logs[j] += math.log1p(lam * x)
+        top = max(logs)
+        log_mean = top + math.log(sum(math.exp(v - top) for v in logs) / len(STAKES))
+        return min(1.0, math.exp(-log_mean))
     if not batches:
-        return 1.0
-    d = [2 * r - n for r, n in batches]           # 2 * (right - size/2), an integer
-    observed = sum(d)
-    dist = {0: 1}
-    for x in d:
-        nxt: dict[int, int] = {}
-        for s_, w in dist.items():
-            for v in (s_ + x, s_ - x):
-                nxt[v] = nxt.get(v, 0) + w
-        dist = nxt
-    hits = sum(w for v, w in dist.items() if v >= observed)
-    return min(1.0, hits / 2 ** len(d))
+        return 1.0, 1.0
+    return p_for(+1), p_for(-1)
 
 
 def design_effect(values: list[float], clusters: list | None) -> float:
@@ -139,14 +148,6 @@ def design_effect(values: list[float], clusters: list | None) -> float:
         return float(n)
     robust = sum(t * t for t in sums.values()) * (m / (m - 1)) * ((n - 1) / n)
     return max(1.0, robust / plain)
-
-
-def p_luck(k: int, n: int) -> float:
-    """Probability of at least k right out of n if the agent were a coin flip (one-sided exact binomial).
-    Small is good: 0.05 is suggestive, 0.001 is strong. 1.0 when there is nothing to test."""
-    if n == 0:
-        return 1.0
-    return min(1.0, sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n)
 
 
 def wilson_interval(k: float, n: float, z: float = 1.96) -> tuple[float, float]:
@@ -195,7 +196,8 @@ class Record:
     cum_return: float
     sharpe: float
     max_drawdown: float
-    # How sure the record is. p_luck: chance a coin flip does this well. Intervals are 95%.
+    # How sure the record is. p_luck: chance a coin flip does this well (valid however often checked).
+    # Intervals are 95%.
     p_luck: float = 1.0
     hit_rate_low: float = 0.0
     hit_rate_high: float = 1.0
@@ -203,6 +205,7 @@ class Record:
     bss_high: float = 1.0
     evidence: str = "insufficient"
     tries: int = 0       # independent tries: calls posted together count once
+    p_worse: float = 1.0  # the same test the other way: chance a coin flip does this badly
 
 
 def record(briers: list[float | None], results: list[str], returns: list[float],
@@ -235,7 +238,7 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         if sd > 0:
             sharpe = mean / sd * math.sqrt(len(returns))
     batches = _batches(hits, cl)
-    p = p_luck_batched(batches)
+    p, p_worse = luck_odds(batches)
     n_eff = n / design_effect([float(h) for h in hits], cl) if n else 0.0
     hlo, hhi = wilson_interval(hit * n_eff, n_eff)
     blo, bhi = bss_interval(scored_b, deff=design_effect(scored_b, cl))
@@ -245,7 +248,7 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         cum_return=round(cum - 1.0, 6), sharpe=round(sharpe, 4), max_drawdown=round(mdd, 6),
         p_luck=round(p, 6), hit_rate_low=round(hlo, 4), hit_rate_high=round(hhi, 4),
         bss_low=round(blo, 4), bss_high=round(bhi, 4), evidence=evidence(len(batches), p),
-        tries=len(batches),
+        tries=len(batches), p_worse=round(p_worse, 6),
     )
 
 

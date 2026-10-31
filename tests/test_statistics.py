@@ -9,15 +9,6 @@ from tests.conftest import set_price
 from tests.test_api import Agent
 
 
-def test_p_luck_hand_values():
-    assert scoring.p_luck(0, 0) == 1.0
-    assert scoring.p_luck(10, 10) == pytest.approx(1 / 1024)
-    assert scoring.p_luck(5, 10) == pytest.approx(0.623, abs=1e-3)       # at or above half
-    assert scoring.p_luck(18, 25) == pytest.approx(0.0216, abs=1e-3)     # 72% of 25
-    assert scoring.p_luck(72, 100) == pytest.approx(1.6e-5, abs=1e-5)    # 72% of 100
-    assert scoring.p_luck(0, 10) == 1.0
-
-
 def test_wilson_interval_behaves():
     lo, hi = scoring.wilson_interval(18, 25)
     assert 0.52 < lo < 0.55 and 0.85 < hi < 0.87
@@ -36,7 +27,13 @@ def test_evidence_labels():
 def test_record_carries_uncertainty():
     rec = scoring.record([0.04] * 18 + [0.64] * 7, ["right"] * 18 + ["wrong"] * 7, [0.0] * 25)
     assert rec.n == 25 and rec.hit_rate == pytest.approx(0.72)
-    assert rec.p_luck == pytest.approx(0.0216, abs=1e-3) and rec.evidence == "suggestive"
+    # 18 right, 7 wrong, each alone. Hand formula: mean over stakes s of (1+s)^18 (1-s)^7 ≈ 8.20,
+    # so luck odds ≈ 0.122. The old one-look test said 0.0216 ("suggestive"); checked every minute
+    # that was not honest. Now: no evidence yet.
+    stakes = (0.1, 0.2, 0.3, 0.4, 0.5)
+    bankroll = sum((1 + s) ** 18 * (1 - s) ** 7 for s in stakes) / 5
+    assert rec.p_luck == pytest.approx(1 / bankroll, rel=1e-4) and 0.11 < rec.p_luck < 0.13
+    assert rec.evidence == "none"
     assert rec.bss_low < rec.bss < rec.bss_high
     lucky = scoring.record([0.04] * 4, ["right"] * 4, [0.0] * 4)
     assert lucky.evidence == "insufficient" and lucky.hit_rate == 1.0

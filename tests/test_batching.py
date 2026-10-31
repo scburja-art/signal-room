@@ -20,22 +20,71 @@ def test_batches_by_first_call_within_a_minute():
     assert scoring.cluster_ids(at(0, 50, 100, 150), 60) == [0, 0, 1, 1]
 
 
-def test_single_calls_match_the_old_binomial_exactly():
-    for k, n in [(0, 0), (3, 4), (18, 25), (43, 72), (68, 112)]:
-        assert scoring.p_luck_batched([(1, 1)] * k + [(0, 1)] * (n - k)) == pytest.approx(scoring.p_luck(k, n))
+def mean_bankroll(rights, wrongs):
+    """Hand formula: average over the five stakes of (1+stake)^rights * (1-stake)^wrongs."""
+    stakes = (0.1, 0.2, 0.3, 0.4, 0.5)
+    return sum((1 + s) ** rights * (1 - s) ** wrongs for s in stakes) / len(stakes)
+
+
+def test_one_call_hand_values():
+    # One right: mean(1.1, 1.2, 1.3, 1.4, 1.5) = 1.3 → odds 1/1.3. One wrong: bankroll 0.7 → no evidence.
+    assert scoring.luck_odds([(1, 1)]) == pytest.approx((1 / 1.3, 1.0))
+    assert scoring.luck_odds([(0, 1)]) == pytest.approx((1.0, 1 / 1.3))
+    assert scoring.luck_odds([]) == (1.0, 1.0)
 
 
 def test_three_batches_of_four_all_right():
-    # Independent: 12 of 12 = 1/4096. As three batches each +2: only all-plus reaches +6 → 1/8.
-    assert scoring.p_luck(12, 12) == pytest.approx(1 / 4096)
-    assert scoring.p_luck_batched([(4, 4)] * 3) == pytest.approx(1 / 8)
+    # 12 calls alone: mean((1+s)^12) = 221.79 / 5 = 44.36 → about 1 in 44.
+    # As three batches each fully right: mean((1+s)^3) = 11.375 / 5 = 2.275 → about 1 in 2.3.
+    alone = scoring.luck_odds([(1, 1)] * 12)[0]
+    batched = scoring.luck_odds([(4, 4)] * 3)[0]
+    assert alone == pytest.approx(1 / 44.358, rel=1e-3)
+    assert batched == pytest.approx(1 / 2.275, rel=1e-6)
 
 
 def test_mixed_batch_sizes():
-    # A: 2 of 2 (d=+1), B: 1 of 1 (d=+0.5). Sums over sign flips: 1.5, 0.5, -0.5, -1.5 → p = 1/4.
-    assert scoring.p_luck_batched([(2, 2), (1, 1)]) == pytest.approx(0.25)
-    # A split batch (1 of 2) is worth 0 either way, so only B's flip matters → p = 1/2.
-    assert scoring.p_luck_batched([(1, 2), (1, 1)]) == pytest.approx(0.5)
+    # A batch of 2 fully right counts like one right call; a split batch (1 of 2) is a wash.
+    assert scoring.luck_odds([(2, 2), (1, 1)])[0] == pytest.approx(1 / mean_bankroll(2, 0))
+    assert scoring.luck_odds([(1, 2), (1, 1)])[0] == pytest.approx(1 / 1.3)
+
+
+def test_order_does_not_matter_and_fading_loses_the_verdict():
+    assert scoring.luck_odds([(1, 1)] * 5 + [(0, 1)] * 2) == pytest.approx(scoring.luck_odds([(0, 1), (1, 1)] * 2 + [(1, 1)] * 3))
+    # 10 right then 10 wrong: (1+s)^10 (1-s)^10 = (1-s^2)^10 < 1 → back to no evidence.
+    assert scoring.luck_odds([(1, 1)] * 10 + [(0, 1)] * 10)[0] == 1.0
+
+
+def test_worse_than_chance_is_the_mirror():
+    assert scoring.luck_odds([(0, 1)] * 12)[1] == pytest.approx(scoring.luck_odds([(1, 1)] * 12)[0])
+
+
+def test_checking_constantly_cannot_manufacture_skill():
+    """A coin-flipper checked after every call. The old one-look test calls it 'probably not luck'
+    at some point far more often than 1 in 20; the betting test stays under 1 in 20."""
+    import math
+    import random
+
+    def one_look_p(k, n):
+        return sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n
+
+    rng = random.Random(20261031)
+    runs, steps = 300, 300
+    fooled_old = fooled_new = 0
+    for _ in range(runs):
+        calls, k = [], 0
+        hit_old = hit_new = False
+        for t in range(1, steps + 1):
+            right = rng.random() < 0.5
+            k += right
+            calls.append((1 if right else 0, 1))
+            if not hit_old and t % 5 == 0 and one_look_p(k, t) < 0.05:
+                hit_old = True
+            if not hit_new and scoring.luck_odds(calls)[0] < 0.05:
+                hit_new = True
+        fooled_old += hit_old
+        fooled_new += hit_new
+    assert fooled_new / runs <= 0.05
+    assert fooled_old / runs > 0.15          # the problem the betting test fixes
 
 
 def test_record_uses_batches_for_luck_and_evidence():
@@ -44,8 +93,8 @@ def test_record_uses_batches_for_luck_and_evidence():
     alone = scoring.record(briers, results, [0.0] * 12)
     batched = scoring.record(briers, results, [0.0] * 12, clusters=[0] * 4 + [1] * 4 + [2] * 4)
     assert alone.hit_rate == batched.hit_rate == 1.0 and alone.bss == batched.bss
-    assert alone.p_luck == pytest.approx(1 / 4096, rel=1e-3) and alone.tries == 12
-    assert batched.p_luck == pytest.approx(0.125) and batched.tries == 3
+    assert alone.p_luck == pytest.approx(1 / 44.358, rel=1e-3) and alone.tries == 12
+    assert batched.p_luck == pytest.approx(1 / 2.275, rel=1e-5) and batched.tries == 3
     assert batched.evidence == "insufficient"          # 3 tries, under 10
 
 
@@ -59,7 +108,7 @@ def test_batching_only_ever_widens_the_ranges():
     assert batched.hit_rate_low <= alone.hit_rate_low and batched.hit_rate_high >= alone.hit_rate_high
     assert batched.bss_low <= alone.bss_low and batched.bss_high >= alone.bss_high
     # every batch its own call → identical to no batching
-    same = scoring.record(briers, results, [0.0] * 12, clusters=list(range(12)))
+    same = scoring.record(briers, results, [0.0] * 12, clusters=list(range(12)))  # each call alone
     assert (same.p_luck, same.hit_rate_low, same.bss_low) == (alone.p_luck, alone.hit_rate_low, alone.bss_low)
 
 
