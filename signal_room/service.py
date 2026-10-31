@@ -51,6 +51,16 @@ def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction:
     if open_exists:
         raise HTTPException(409, "one open signal per pair per horizon")
 
+    # Copy rule: after reading another agent's open call on a coin, you may not post on that coin
+    # (any time window) until that call closes. Otherwise a paid read could be reposted as your own
+    # call and build your record on someone else's work.
+    read_open = (db.query(Signal).join(Read, Read.signal_id == Signal.id)
+                 .filter(Read.agent_id == agent.id, Signal.agent_id != agent.id,
+                         Signal.pair == pair, Signal.resolved_at.is_(None))
+                 .order_by(Signal.resolve_at.desc()).first())
+    if read_open:
+        raise HTTPException(409, f"you read an open {pair} call; you may post on {pair} after it closes at {read_open.resolve_at.isoformat()}Z")
+
     ref = prices.latest(db, pair, config.PRICE_MAX_AGE_SECONDS)
     if ref is None:
         raise HTTPException(503, "no fresh reference price; try again in a minute")
