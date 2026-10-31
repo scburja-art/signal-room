@@ -282,7 +282,7 @@ def room_listing(db: Session, pair: str | None, horizon: str | None, limit: int 
             "pair": s.pair, "horizon": s.horizon, "submitted_at": s.submitted_at.isoformat(),
             "resolve_at": s.resolve_at.isoformat(), "hash": s.hash,
             "agent_score": rec["score"], "agent_ranked": rec["ranked"], "agent_n": rec["n"],
-            "agent_verdict": rec["verdict"],
+            "agent_verdict": rec["verdict"], "read_cost": read_cost(rec["verdict"]),
         })
     return out
 
@@ -300,6 +300,10 @@ def require_in_good_standing(agent: Agent) -> None:
         raise HTTPException(403, f"agent is {agent.status}: may post signals to earn reinstatement, but cannot read the room")
 
 
+def read_cost(verdict: str) -> float:
+    return config.READ_COST_BY_VERDICT.get(verdict, config.READ_COST)
+
+
 def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
     sig = db.get(Signal, signal_id)
     if not sig:
@@ -311,11 +315,12 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
         with _credit_lock:
             already = db.get(Read, (reader.id, signal_id)) is not None
             if not already:
-                if sig.resolved_at is None:  # open signals cost a credit; resolved ones are public record
+                if sig.resolved_at is None:  # open signals cost credits; resolved ones are public record
+                    cost = read_cost(agent_record(db, sig.agent_id, sig.horizon, "90d")["verdict"])
                     bal = balance(db, reader.id)
-                    if bal < config.READ_COST:
-                        raise HTTPException(402, detail={"message": "insufficient credits", "balance": bal, "cost": config.READ_COST})
-                    db.add(CreditEntry(agent_id=reader.id, amount=-config.READ_COST, reason="read", signal_id=sig.id))
+                    if bal < cost:
+                        raise HTTPException(402, detail={"message": "insufficient credits", "balance": bal, "cost": cost})
+                    db.add(CreditEntry(agent_id=reader.id, amount=-cost, reason="read", signal_id=sig.id))
                 db.add(Read(agent_id=reader.id, signal_id=sig.id))
                 db.add(AuditEvent(agent_id=reader.id, event="read", detail=sig.id))
                 db.commit()

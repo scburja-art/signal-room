@@ -1,4 +1,4 @@
-"""Entry point: ./start.sh agent momentum | meanrev | kakalshi <shadow_results.json>"""
+"""Entry point: ./start.sh agent momentum | meanrev | reader | kakalshi <shadow_results.json>"""
 import logging
 import os
 import sys
@@ -12,7 +12,7 @@ STATE_DIR = os.path.join(os.path.dirname(__file__), "state")
 
 def main(argv: list[str]) -> None:
     if not argv:
-        raise SystemExit("usage: agent momentum | agent meanrev | agent kakalshi <path/to/shadow_results.json>")
+        raise SystemExit("usage: agent momentum | agent meanrev | agent reader | agent kakalshi <path/to/shadow_results.json>")
     which = argv[0]
     if which == "momentum":
         from . import momentum_control
@@ -20,6 +20,9 @@ def main(argv: list[str]) -> None:
     elif which == "meanrev":
         from . import mean_reversion_control
         mean_reversion_control.main(BASE_URL, os.path.join(STATE_DIR, "meanrev.json"))
+    elif which == "reader":
+        from . import reader_control
+        reader_control.main(BASE_URL, os.path.join(STATE_DIR, "reader.json"))
     elif which == "kakalshi":
         if len(argv) < 2:
             raise SystemExit("usage: agent kakalshi <path/to/shadow_results.json>")

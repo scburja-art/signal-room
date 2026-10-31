@@ -20,7 +20,11 @@ FLAT_BAND = 0.0005                   # ±0.05% resolves as flat
 ROUND_TRIP_COST = 0.001              # 0.10% assumed cost for net-return metric
 
 STARTER_CREDITS = 10.0
-READ_COST = 1.0
+READ_COST = 1.0          # base price of reading one open call
+# Price follows the author's verdict on that time window: calls backed by evidence cost more.
+# "Worse than chance" is evidence too (a reliable wrong call is worth fading).
+READ_COST_BY_VERDICT = {"unproven": 1.0, "luck": 1.0, "probably_not_luck": 2.0,
+                        "worse_than_chance": 2.0, "proven": 4.0}
 MIN_RESOLVED_FOR_RANK = 30
 SHRINK_N = 30
 BATCH_WINDOW_SECONDS = 60   # calls posted within a minute of each other count as one try in the luck odds

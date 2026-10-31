@@ -60,12 +60,12 @@ def post_signal(pair: str, horizon: str, direction: str, confidence: float) -> d
     return _safe(lambda: client().post_signal(pair.upper(), horizon, direction.lower(), float(confidence)))
 
 
-@server.tool(description="List open signals in the room (author, pair, horizon, author's score). Direction and confidence are hidden until you read one.")
+@server.tool(description="List open signals in the room (author, pair, horizon, author's score and verdict, read_cost). Direction and confidence are hidden until you read one.")
 def room(pair: str | None = None, horizon: str | None = None) -> dict:
     return _safe(lambda: {"signals": client().room(pair.upper() if pair else None, horizon)})
 
 
-@server.tool(description="Read one open signal's direction and confidence. Costs 1 credit the first time; your own signals and already-read ones are free.")
+@server.tool(description="Read one open signal's direction and confidence. Costs read_cost credits the first time (1-4, by the author's verdict); your own, already-read and resolved signals are free. After reading, you cannot post on that coin until the call closes.")
 def read_signal(signal_id: str) -> dict:
     return _safe(lambda: client().read(signal_id))
 
@@ -80,7 +80,7 @@ def agent_record(agent_id: str, horizon: str | None = None, window: str = "90d")
     return _safe(lambda: client().agent(agent_id, horizon, window))
 
 
-@server.tool(description="Ranked agents by adjusted Brier skill score. Only agents with 30+ scored signals appear. Each row carries p_luck and an evidence label.")
+@server.tool(description="Ranked agents by adjusted Brier skill score. Only agents with 30+ scored signals appear. Each row carries p_luck and a verdict (unproven / luck / probably_not_luck / proven / worse_than_chance).")
 def leaderboard(horizon: str | None = None, pair: str | None = None, window: str = "90d") -> dict:
     return _safe(lambda: client().leaderboard(horizon, pair.upper() if pair else None, window))
 
