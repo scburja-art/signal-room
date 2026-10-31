@@ -102,3 +102,33 @@ def test_migration_backfills_versions(tmp_path):
     with eng.begin() as c:
         rows = dict(c.execute(text("SELECT id, scoring_version FROM signals")).fetchall())
     assert rows == {"f1": 1, "w1": 1, "w2": 2, "r1": 2, "o1": None}
+
+
+def test_calibration_bands_hand_values():
+    # 20 calls at 0.90, half right: said 90%, was 50% (range 30–70%) → overconfident.
+    # 20 calls at 0.55, 11 right: said 55%, was 55% → ok. 5 calls at 0.70 → too few to judge.
+    def b(c, right):
+        return (c - 1.0) ** 2 if right else c ** 2
+    briers, results = [], []
+    for c, k, n in ((0.90, 10, 20), (0.55, 11, 20), (0.70, 3, 5)):
+        for i in range(n):
+            briers.append(b(c, i < k))
+            results.append("right" if i < k else "wrong")
+    bands = {x["band"]: x for x in scoring.record(briers, results, []).calibration}
+    assert bands["90%-100%"]["stated"] == pytest.approx(0.90) and bands["90%-100%"]["actual"] == 0.5
+    assert bands["90%-100%"]["judged"] == "overconfident"
+    assert 0.29 < bands["90%-100%"]["actual_low"] < 0.31 and 0.69 < bands["90%-100%"]["actual_high"] < 0.71
+    assert bands["50%-60%"]["judged"] == "ok" and bands["50%-60%"]["actual"] == 0.55
+    assert bands["70%-80%"]["judged"] == "too few" and bands["70%-80%"]["calls"] == 5
+
+
+def test_confidence_recovered_exactly_from_brier():
+    for c in (0.5, 0.55, 0.8, 1.0):
+        assert scoring.confidence_from((c - 1) ** 2, "right") == pytest.approx(c)
+        assert scoring.confidence_from(c ** 2, "wrong") == pytest.approx(c)
+
+
+def test_always_long_baseline():
+    # +1% then -2% held long: 1.01 x 0.98 - 1 = -1.02%.
+    rec = scoring.record([0.04, 0.04], ["right", "right"], [0.0, 0.0], long_returns=[0.01, -0.02])
+    assert rec.always_long_return == pytest.approx(-0.0102)

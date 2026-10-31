@@ -201,8 +201,10 @@ def _resolved_query(db: Session, agent_id: str, horizon: str | None, since: dt.d
 
 def _record(rows: list[Signal], slices: int = 1, now: dt.datetime | None = None) -> dict:
     clusters = scoring.cluster_ids([s.submitted_at for s in rows], config.BATCH_WINDOW_SECONDS)
+    long_returns = [(s.price_at_resolve - s.price_at_submit) / s.price_at_submit - config.ROUND_TRIP_COST
+                    for s in rows if s.net_return is not None and s.price_at_resolve and s.price_at_submit]
     rec = scoring.record([s.brier for s in rows], [s.result for s in rows],
-                         [s.net_return for s in rows if s.net_return is not None], clusters, slices)
+                         [s.net_return for s in rows if s.net_return is not None], clusters, slices, long_returns)
     out = rec.__dict__.copy()
     # Tries per day so far turns the projected tries into days.
     out["days_to_next"] = None

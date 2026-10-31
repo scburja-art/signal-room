@@ -33,7 +33,7 @@ when an agent is reliably worse than a coin flip.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import config
 
@@ -249,17 +249,67 @@ class Record:
     next_verdict: str | None = None
     tries_to_next: int | None = None   # projection, if the next stretch looks like the record so far
     exploratory: bool = False      # a slice (one coin or one time window): the bar is raised per slice
+    always_long_return: float = 0.0   # the same windows, same cost, always calling long: the no-skill baseline
+    calibration: list = field(default_factory=list)   # per confidence band: stated vs actual
+
+
+CALIBRATION_BANDS = ((0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.0001))
+CALIBRATION_MIN = 10   # separate tries in a band before it is judged
+
+
+def confidence_from(brier_score: float, result: str) -> float:
+    """Stated confidence, recovered exactly from a call's Brier: right → (1-c)^2, wrong → c^2."""
+    root = math.sqrt(brier_score)
+    return 1.0 - root if result == "right" else root
+
+
+def calibration(confs: list[float], hits: list[int], clusters: list | None) -> list[dict]:
+    """For each confidence band: how sure the agent said it was vs how often it was right, with a
+    95% range on the actual rate (batched calls count once). An agent whose stated confidence sits
+    outside that range is overconfident or underconfident in that band."""
+    out = []
+    for lo, hi in CALIBRATION_BANDS:
+        idx = [i for i, c in enumerate(confs) if lo <= c < hi]
+        if not idx:
+            continue
+        cl = [clusters[i] for i in idx] if clusters is not None else None
+        h = [hits[i] for i in idx]
+        tries = len(set(cl)) if cl is not None else len(idx)
+        stated = sum(confs[i] for i in idx) / len(idx)
+        actual = sum(h) / len(h)
+        n_eff = len(h) / design_effect([float(x) for x in h], cl)
+        low, high = wilson_interval(actual * n_eff, n_eff)
+        if tries < CALIBRATION_MIN:
+            judged = "too few"
+        elif stated > high:
+            judged = "overconfident"
+        elif stated < low:
+            judged = "underconfident"
+        else:
+            judged = "ok"
+        out.append({"band": f"{lo:.0%}-{min(hi, 1.0):.0%}", "calls": len(idx), "tries": tries,
+                    "stated": round(stated, 4), "actual": round(actual, 4),
+                    "actual_low": round(low, 4), "actual_high": round(high, 4), "judged": judged})
+    return out
+
+
+def compounded(returns: list[float]) -> float:
+    cum = 1.0
+    for r in returns:
+        cum *= 1.0 + r
+    return cum - 1.0
 
 
 def record(briers: list[float | None], results: list[str], returns: list[float],
-           clusters: list | None = None, slices: int = 1) -> Record:
+           clusters: list | None = None, slices: int = 1, long_returns: list[float] | None = None) -> Record:
     """briers/results/clusters are parallel lists over resolved signals; returns covers those with
     a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved under
     rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
     clusters: batch id per signal (see cluster_ids); None treats every call as independent.
     slices: how many slices of the agent's record this one is one of (e.g. 4 coins). Looking at many
     slices and keeping the best is how a lucky slice gets mistaken for skill, so the luck odds are
-    multiplied by the number of slices (Bonferroni) and the record is marked exploratory."""
+    multiplied by the number of slices (Bonferroni) and the record is marked exploratory.
+    long_returns: what always calling long would have made over the same windows at the same cost."""
     keep = [i for i, r in enumerate(results) if r in ("right", "wrong")]
     scored_b = [briers[i] for i in keep]
     hits = [1 if results[i] == "right" else 0 for i in keep]
@@ -300,6 +350,8 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         tries=len(batches), p_worse=round(p_worse, 6), verdict=v, skill_points=round(bss * 100),
         next_verdict=nxt, tries_to_next=tries_to_reach(batches, LADDER[nxt] / slices) if nxt else None,
         exploratory=slices > 1,
+        always_long_return=round(compounded(long_returns or []), 6),
+        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl),
     )
 
 

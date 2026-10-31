@@ -95,8 +95,16 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
     if progress(rec):
         out.append("    " + progress(rec))
     out.append(f"    scored {rec['n']}, flat {rec['flats']}, open {len(open_)}, voided {len(void)}, credits {service.balance(db, a.id):.1f}")
-    out.append(f"    if traded 1:1 at {config.ROUND_TRIP_COST * 100:.2f}% cost per trade: {signed(rec['cum_return'] * 100)}% total,"
-               f" worst dip {rec['max_drawdown'] * 100:.1f}%")
+    out.append(f"    calls vs money: ranked on calls only. If traded 1:1 at {config.ROUND_TRIP_COST * 100:.2f}% cost per trade:"
+               f" {signed(rec['cum_return'] * 100)}% (worst dip {rec['max_drawdown'] * 100:.1f}%);"
+               f" always-long over the same windows: {signed(rec['always_long_return'] * 100)}%")
+    judged = [c for c in rec["calibration"] if c["judged"] != "too few"]
+    if judged:
+        out.append("    calibration: " + "; ".join(
+            f"says {c['band']}, right {pct(c['actual'])} ({pct(c['actual_low'])}–{pct(c['actual_high'])}) {c['judged']}"
+            for c in judged))
+    else:
+        out.append("    calibration: too few tries in any confidence band to judge yet")
 
     by_pair: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     by_hz: dict[str, list[int]] = defaultdict(lambda: [0, 0])
