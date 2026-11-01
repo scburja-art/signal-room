@@ -95,6 +95,18 @@ def test_scoreboard_draws_from_the_database(client, session_factory, monkeypatch
     monkeypatch.setattr(dbmod, "SessionLocal", session_factory)
     a = Agent(client, "momentum-control")
     post_and_resolve(client, session_factory, a, 3, right=True, confidence=0.6)
-    board = "\n".join(feed.scoreboard(color=False))
-    assert "Momentum" in board and "Unproven" in board and "100% right" in board and "3 scored" in board
-    assert "Verdicts: Unproven → Luck → Probably not luck → Proven" in board
+    lines = feed.scoreboard(color=False)
+    header = next(line for line in lines if "Verdict" in line)
+    row = next(line for line in lines if "Momentum" in line)
+    assert header.split() == ["Bot", "Verdict", "Right", "vs.", "coin", "flip", "Calls", "Next", "step"]
+    # 3 of 3 right at 60%: skill = 1 - 0.16/0.25 = +0.36 → 36 points better; unproven, so no next step.
+    assert row.split() == ["Momentum", "Unproven", "100%", "▲", "36", "better", "3", "—"]
+    assert header.index("Calls") + len("Calls") == row.index("3 ") + 1      # numbers right-align under their header
+    assert any("Ladder: Unproven → Luck → Probably not luck → Proven" in line for line in lines)
+
+
+def test_skill_reads_as_a_direction():
+    assert feed.versus_coin_flip(6) == ("▲ 6 better", feed.GREEN)
+    assert feed.versus_coin_flip(-4) == ("▼ 4 worse", feed.RED)
+    assert feed.versus_coin_flip(1)[0] == feed.versus_coin_flip(-1)[0] == feed.versus_coin_flip(0)[0] == "≈ even"
+    assert feed.days_text(3.4) == "~3 days" and feed.days_text(0.6) == "~1 day" and feed.days_text(None) == "—"

@@ -151,39 +151,66 @@ def render(line: str, color: bool = True) -> str | None:
     return p.row(when, who, "", GRAY, p(GRAY, msg))
 
 
+def versus_coin_flip(points: int) -> tuple[str, str]:
+    """Skill as a direction a glance can read: (text, color)."""
+    if abs(points) <= 1:
+        return "≈ even", GRAY
+    if points > 0:
+        return f"▲ {points} better", GREEN
+    return f"▼ {-points} worse", RED
+
+
+def days_text(days: float | None) -> str:
+    if days is None:
+        return "—"
+    d = max(1, round(days))
+    return f"~{d} day{'s' if d != 1 else ''}"
+
+
 def scoreboard(color: bool = True) -> list[str]:
-    """Every bot's standing in one short block, from the database."""
+    """Every bot's standing in one short block, from the database. One header row labels the
+    columns so each line holds only values."""
     from . import service
     from .db import Agent, Read, SessionLocal, Signal
 
     p = Painter(color)
     db = SessionLocal()
     try:
-        title = f" Scoreboard · {dt.datetime.now().strftime('%I:%M %p').lstrip('0')} "
-        out = ["", p(BOLD, f"──{title}" + "─" * max(4, 70 - len(title)))]
+        bots, readers = [], []
         for a in db.query(Agent).order_by(Agent.created_at).all():
-            name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
             if db.query(Signal).filter(Signal.agent_id == a.id).count():
                 r = service.public_agent(db, a, None, "90d")
-                if r["n"] == 0:
-                    out.append(f"  {name} {'Unproven':<18} nothing scored yet")
-                    continue
-                verdict = VERDICTS.get(r["verdict"], r["verdict"])
-                code = {"proven": GREEN, "probably_not_luck": GREEN, "worse_than_chance": RED,
-                        "delisted": RED, "retired": RED}.get(r["verdict"], WHITE)
-                nxt = ""
-                if r.get("days_to_next") is not None and r["verdict"] != "unproven":
-                    nxt = f" · next step in ~{r['days_to_next']:g} days"
-                out.append(f"  {name} {p(code, f'{verdict:<18}')} {r['hit_rate'] * 100:>3.0f}% right · skill {r['skill_points']:+d}"
-                           f" · {r['n']} scored{nxt}")
+                bots.append((a, r))
                 continue
             reads = db.query(Signal.result).join(Read, Read.signal_id == Signal.id).filter(
                 Read.agent_id == a.id, Signal.agent_id != a.id).all()
             if reads:
                 done = [x[0] for x in reads if x[0] in ("right", "wrong")]
-                out.append(f"  {name} {'Reader':<18} {len(reads)} paid reads · {done.count('right')} of {len(done)} closed were right"
-                           f" · {service.balance(db, a.id):g} credits left")
-        out.append(p(GRAY, "  Verdicts: Unproven → Luck → Probably not luck → Proven.  Skill 0 = a coin flip."))
+                readers.append((a, len(reads), done.count("right"), len(done), service.balance(db, a.id)))
+
+        vw = max([len("Verdict")] + [len(VERDICTS.get(r["verdict"], r["verdict"])) for _, r in bots])
+        title = f" Scoreboard · {dt.datetime.now().strftime('%I:%M %p').lstrip('0')} "
+        out = ["", p(BOLD, f"──{title}" + "─" * max(4, 70 - len(title)))]
+        out.append(p(GRAY, f"  {'Bot':<13} {'Verdict':<{vw}}  {'Right':>5}   {'vs. coin flip':<13}  {'Calls':>5}   Next step"))
+        for a, r in bots:
+            name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
+            verdict = VERDICTS.get(r["verdict"], r["verdict"])
+            vcode = {"proven": GREEN, "probably_not_luck": GREEN, "worse_than_chance": RED,
+                     "delisted": RED, "retired": RED}.get(r["verdict"], WHITE)
+            if r["n"] == 0:
+                skill, scode, right, nxt = "—", GRAY, "—", "—"
+            else:
+                skill, scode = versus_coin_flip(r["skill_points"])
+                right = f"{r['hit_rate'] * 100:.0f}%"
+                nxt = days_text(r.get("days_to_next")) if r["verdict"] != "unproven" else "—"
+            out.append(f"  {name} {p(vcode, f'{verdict:<{vw}}')}  {right:>5}   {p(scode, f'{skill:<13}')}  {r['n']:>5}   "
+                       + (p(GRAY, nxt) if nxt == "—" else nxt))
+        if readers:
+            out.append(p(GRAY, "  ─ ─ ─"))
+            for a, n, right, closed, credits in readers:
+                name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
+                out.append(f"  {name} {n} paid read{'s' if n != 1 else ''} · {right} of {closed} right · {credits:g} credits left")
+        out.append(p(GRAY, "  Ladder: Unproven → Luck → Probably not luck → Proven"))
         out.append(p(BOLD, "─" * 72))
         out.append("")
         return out
