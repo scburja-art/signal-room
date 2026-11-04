@@ -137,6 +137,13 @@ def render(line: str, color: bool = True) -> str | None:
         mins = int(gap.group(1)) // 60
         span = f"{mins} min" if mins < 90 else f"{mins / 60:.0f} hours"
         return p.row(when, "Room", "⚠ ASLEEP", YELLOW, f"the laptop was asleep or off for about {span}; missed prices get rebuilt from the exchanges")
+    anchored = re.match(r"anchored (\d{4}-\d\d-\d\d) root (\w+)… in (0x\w+)", msg)
+    if anchored:
+        day = dt.date.fromisoformat(anchored.group(1)).strftime("%b %d").replace(" 0", " ")
+        return p.row(when, "Room", "⛓ ANCHORED", GREEN, f"{day}'s fingerprint of every call is now on the public chain (tx {anchored.group(3)[:10]}…)")
+    failed = re.match(r"anchor failed for (\S+): (.*)", msg)
+    if failed:
+        return p.row(when, "Room", "⚠ ANCHOR", YELLOW, f"couldn't write {failed.group(1)}'s fingerprint yet ({failed.group(2)[:60]}); retrying next minute")
     if HIDE.search(msg):
         return None
     if "running as" in msg or "adapter watching" in msg:

@@ -110,3 +110,10 @@ def test_skill_reads_as_a_direction():
     assert feed.versus_coin_flip(-4) == ("▼ 4 worse", feed.RED)
     assert feed.versus_coin_flip(1)[0] == feed.versus_coin_flip(-1)[0] == feed.versus_coin_flip(0)[0] == "≈ even"
     assert feed.days_text(3.4) == "~3 days" and feed.days_text(0.6) == "~1 day" and feed.days_text(None) == "—"
+
+
+def test_anchor_lines_in_plain_words():
+    ok = feed.render("2026-11-04 09:50:23,597 INFO signal_room.anchor: anchored 2026-11-03 root d66ff0f89707… in 0x3520d47162353a54d44c5306de3fbe40934a42000c6ba8d785aa2809ee1a2c35", color=False)
+    assert ok == " 9:50 AM  Room          ⛓ ANCHORED Nov 3's fingerprint of every call is now on the public chain (tx 0x3520d471…)"
+    bad = feed.render("2026-11-04 09:51:23,000 WARNING signal_room.scheduler: anchor failed for 2026-10-26: rpc down", color=False)
+    assert "couldn't write 2026-10-26's fingerprint yet" in bad and "retrying" in bad

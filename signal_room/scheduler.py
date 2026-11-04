@@ -7,12 +7,29 @@ import threading
 import time
 
 from . import anchor, auth, config, prices, service
-from .db import AuditEvent, SessionLocal, utcnow
+from sqlalchemy import func
+
+from .db import AuditEvent, DailyLog, SessionLocal, Signal, utcnow
 
 log = logging.getLogger("signal_room.scheduler")
 
 
 _last_tick: list[float] = []
+
+
+def oldest_unanchored(db, today: dt.date) -> dt.date | None:
+    """The earliest closed day, from the first signal ever posted to yesterday, not yet anchored.
+    Days with no calls count too: an anchored empty root proves nothing was slipped in later."""
+    first = db.query(func.min(Signal.submitted_at)).scalar()
+    if first is None:
+        return None
+    done = {d for (d,) in db.query(DailyLog.day).filter(DailyLog.anchored_tx.isnot(None))}
+    day = first.date()
+    while day < today:
+        if day.isoformat() not in done:
+            return day
+        day += dt.timedelta(days=1)
+    return None
 
 
 def tick() -> dict:
@@ -33,15 +50,18 @@ def tick() -> dict:
             log.warning("price sample failed: %s", e)
             out["prices"] = 0
         out["resolved"] = service.resolve_due(db)
-        yesterday = (utcnow() - dt.timedelta(days=1)).date()
-        ylog = service.build_daily_log(db, yesterday)
-        service.build_daily_log(db, utcnow().date())
-        # Yesterday is closed, so its root is final: anchor it once. Today's root keeps changing.
-        if anchor.enabled() and not ylog.anchored_tx:
-            try:
-                out["anchored"] = anchor.anchor_day(db, ylog)
-            except Exception as e:
-                log.warning("anchor failed for %s: %s", yesterday, e)
+        today = utcnow().date()
+        service.build_daily_log(db, today - dt.timedelta(days=1))
+        service.build_daily_log(db, today)
+        # A closed day's root is final, so anchor it once. Today's root keeps changing. One day per tick,
+        # oldest first, so a laptop that was off for days (or a wallet added late) catches up on its own.
+        if anchor.enabled():
+            day = oldest_unanchored(db, today)
+            if day is not None:
+                try:
+                    out["anchored"] = anchor.anchor_day(db, service.build_daily_log(db, day))
+                except Exception as e:
+                    log.warning("anchor failed for %s: %s", day, e)
         auth.purge_old(db)
     finally:
         db.close()
