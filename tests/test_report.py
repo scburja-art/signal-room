@@ -45,6 +45,27 @@ def test_report_counts_window_and_verdict_change(client, session_factory):
     assert "Signal Room, 2026-11-02 (UTC day)" in day
 
 
+def test_free_reads_and_pre_launch_days_not_counted(client, session_factory):
+    from signal_room.db import DailyLog, utcnow
+    author = ApiAgent(client, "momentum-control")
+    post_and_resolve(client, session_factory, author, 1, right=True)
+    sig_id = session_factory().query(Signal).first().id
+    db = session_factory()
+    for sig in db.query(Signal):
+        sig.resolved_at = utcnow() - dt.timedelta(minutes=5)   # closed: reading it is free
+    first_day = db.query(Signal).first().submitted_at.date()
+    db.add(DailyLog(day=(first_day - dt.timedelta(days=1)).isoformat(), merkle_root="0" * 64, signal_count=0))
+    db.add(DailyLog(day=(first_day - dt.timedelta(days=2)).isoformat(), merkle_root="0" * 64, signal_count=0,
+                    anchored_tx="0xabc"))
+    db.commit()
+    verifier = ApiAgent(client, "verifier")
+    assert verifier.get(f"/room/{sig_id}").status_code == 200
+
+    text = report.report(session_factory())
+    assert "verifier" not in text                 # a free read of a closed call is not a purchase
+    assert "nothing waiting" in text              # the empty day before the first call never needs anchoring
+
+
 def test_report_quiet_room(session_factory):
     text = report.report(session_factory())
     assert "no bot closed a call in this window" in text

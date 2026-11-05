@@ -11,7 +11,7 @@ import sys
 from sqlalchemy import func
 
 from . import config, service
-from .db import Agent, AuditEvent, DailyLog, ReferencePrice, SessionLocal, Signal, utcnow
+from .db import Agent, AuditEvent, CreditEntry, DailyLog, ReferencePrice, SessionLocal, Signal, utcnow
 from .feed import NAMES
 from .status import VERDICT_WORDS, pct
 
@@ -38,8 +38,9 @@ def bot_lines(db, agent: Agent, start: dt.datetime, end: dt.datetime) -> list[st
     rows = (db.query(Signal)
             .filter(Signal.agent_id == agent.id, Signal.resolved_at >= start, Signal.resolved_at < end)
             .all())
-    reads = db.query(AuditEvent).filter(AuditEvent.agent_id == agent.id, AuditEvent.event == "read",
-                                        AuditEvent.created_at >= start, AuditEvent.created_at < end).count()
+    # Paid reads only: an open call bought with credits. Reading a closed call is free (the verify tool does it).
+    reads = db.query(CreditEntry).filter(CreditEntry.agent_id == agent.id, CreditEntry.reason == "read",
+                                         CreditEntry.created_at >= start, CreditEntry.created_at < end).count()
     if not rows and not reads:
         return None
     name = NAMES.get(agent.name or "", agent.name or agent.id)
@@ -105,7 +106,11 @@ def report(db, day: dt.date | None = None, now: dt.datetime | None = None) -> st
                  + (f", {rebuilt} minutes rebuilt from exchange candles" if rebuilt else ""))
     last = (db.query(DailyLog).filter(DailyLog.anchored_tx.isnot(None))
             .order_by(DailyLog.day.desc()).first())
-    waiting = db.query(DailyLog).filter(DailyLog.anchored_tx.is_(None), DailyLog.day < utcnow().date().isoformat()).count()
+    first = db.query(func.min(Signal.submitted_at)).scalar()
+    done = {d for (d,) in db.query(DailyLog.day).filter(DailyLog.anchored_tx.isnot(None))}
+    today = utcnow().date()
+    waiting = 0 if first is None else sum(
+        (first.date() + dt.timedelta(days=i)).isoformat() not in done for i in range((today - first.date()).days))
     if last:
         lines.append(f"  on-chain proof: anchored through {last.day} ({last.signal_count} calls that day)"
                      + (f"; {waiting} closed day{'s' if waiting != 1 else ''} still waiting" if waiting else "; nothing waiting"))
