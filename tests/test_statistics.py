@@ -9,14 +9,6 @@ from tests.conftest import set_price
 from tests.test_api import Agent
 
 
-def test_wilson_interval_behaves():
-    lo, hi = scoring.wilson_interval(18, 25)
-    assert 0.52 < lo < 0.55 and 0.85 < hi < 0.87
-    lo, hi = scoring.wilson_interval(10, 10)
-    assert lo > 0.7 and hi == 1.0          # all right, small n: wide but not 100% certain
-    assert scoring.wilson_interval(0, 0) == (0.0, 1.0)
-
-
 def test_verdict_ladder():
     v = scoring.verdict
     assert v(29, 29, 0.0001, 1.0) == "unproven"            # under 30 scored, whatever the odds
@@ -105,7 +97,7 @@ def test_migration_backfills_versions(tmp_path):
 
 
 def test_calibration_bands_hand_values():
-    # 20 calls at 0.90, half right: said 90%, was 50% (range 30–70%) → overconfident.
+    # 20 calls at 0.90, half right: said 90%, was 50% (always-valid range about 21–79%) → overconfident.
     # 20 calls at 0.55, 11 right: said 55%, was 55% → ok. 5 calls at 0.70 → too few to judge.
     def b(c, right):
         return (c - 1.0) ** 2 if right else c ** 2
@@ -117,7 +109,8 @@ def test_calibration_bands_hand_values():
     bands = {x["band"]: x for x in scoring.record(briers, results, []).calibration}
     assert bands["90%-100%"]["stated"] == pytest.approx(0.90) and bands["90%-100%"]["actual"] == 0.5
     assert bands["90%-100%"]["judged"] == "overconfident"
-    assert 0.29 < bands["90%-100%"]["actual_low"] < 0.31 and 0.69 < bands["90%-100%"]["actual_high"] < 0.71
+    lo, hi = bands["90%-100%"]["actual_low"], bands["90%-100%"]["actual_high"]
+    assert lo == pytest.approx(1 - hi, abs=1e-4) and 0.20 < lo < 0.22 and hi < 0.90
     assert bands["50%-60%"]["judged"] == "ok" and bands["50%-60%"]["actual"] == 0.55
     assert bands["70%-80%"]["judged"] == "too few" and bands["70%-80%"]["calls"] == 5
 

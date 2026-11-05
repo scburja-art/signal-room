@@ -131,47 +131,55 @@ def luck_odds(batches: list[tuple[int, int]]) -> tuple[float, float]:
     return p_for(+1), p_for(-1)
 
 
-def design_effect(values: list[float], clusters: list | None) -> float:
-    """How much batching inflates the variance of a mean (cluster-robust over plain), at least 1."""
-    n = len(values)
-    if clusters is None or n < 2:
-        return 1.0
-    mean = sum(values) / n
-    plain = sum((v - mean) ** 2 for v in values)
-    if plain == 0:
-        return 1.0
-    sums: dict = {}
+def _batch_means(values: list[float], clusters: list | None) -> list[float]:
+    """One value per try: the mean over the calls in each batch (no clusters: each call is a try)."""
+    if clusters is None:
+        return list(values)
+    agg: dict = {}
     for v, c in zip(values, clusters):
-        sums[c] = sums.get(c, 0.0) + (v - mean)
-    m = len(sums)
-    if m < 2:
-        return float(n)
-    robust = sum(t * t for t in sums.values()) * (m / (m - 1)) * ((n - 1) / n)
-    return max(1.0, robust / plain)
+        t, n = agg.get(c, (0.0, 0))
+        agg[c] = (t + v, n + 1)
+    return [t / n for t, n in agg.values()]
 
 
-def wilson_interval(k: float, n: float, z: float = 1.96) -> tuple[float, float]:
-    """95% confidence interval for a hit rate. Behaves sensibly at small n and near 0 or 1.
-    k and n may be effective (fractional) counts after a design-effect adjustment."""
-    if n <= 0:
+def _wealth(vs: list[float], m: float, side: int) -> float:
+    """Betting test of "the true mean is m", averaged over STAKES. side +1 bets the mean is above m,
+    -1 below. Stakes are scaled so no single try can lose more than the stake (values lie in [0, 1]).
+    At m = 0.5 on hit rates the +1 side is exactly the luck-odds bankroll."""
+    logs = []
+    for c in STAKES:
+        lam = c / m if side > 0 else c / (1.0 - m)
+        logs.append(sum(math.log1p(side * lam * (v - m)) for v in vs))
+    top = max(logs)
+    if top > 700:
+        return math.inf
+    return sum(math.exp(v) for v in logs) / len(logs)
+
+
+def confidence_range(values: list[float], clusters: list | None, alpha: float = 0.05) -> tuple[float, float]:
+    """Range for the true mean of values in [0, 1], one value per try, that holds however often it is
+    checked: a mean m is ruled out once either side's betting bankroll reaches 2 / alpha (Ville's
+    inequality per side, half of alpha each). Each edge is found by bisection on a monotone bankroll."""
+    vs = _batch_means(values, clusters)
+    if not vs:
         return 0.0, 1.0
-    p = k / n
-    denom = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / denom
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return max(0.0, centre - half), min(1.0, centre + half)
+    mean = sum(vs) / len(vs)
+    bar = 2.0 / alpha
 
+    def edge(side: int, inside: float, outside: float) -> float:
+        # inside: a mean not ruled out (the sample mean, whose bankroll is at most 1); outside: the end of [0, 1]
+        if _wealth(vs, outside, side) < bar:
+            return outside
+        for _ in range(60):
+            mid = (inside + outside) / 2
+            if _wealth(vs, mid, side) >= bar:
+                outside = mid
+            else:
+                inside = mid
+        return outside
 
-def bss_interval(briers: list[float], z: float = 1.96, deff: float = 1.0) -> tuple[float, float]:
-    """95% interval for the Brier skill score from the standard error of the mean Brier,
-    widened by the design effect when calls were batched."""
-    n = len(briers)
-    if n < 2:
-        return -1.0, 1.0
-    mean = sum(briers) / n
-    sd = math.sqrt(sum((b - mean) ** 2 for b in briers) / (n - 1))
-    se = sd / math.sqrt(n) * math.sqrt(deff)
-    return 1.0 - (mean + z * se) / COIN_FLIP_BS, 1.0 - (mean - z * se) / COIN_FLIP_BS
+    eps = 1e-9
+    return edge(+1, mean, eps) if mean > eps else 0.0, edge(-1, mean, 1 - eps) if mean < 1 - eps else 1.0
 
 
 MIN_TRIES = 10   # separate tries before any verdict but "unproven"
@@ -265,7 +273,7 @@ def confidence_from(brier_score: float, result: str) -> float:
 
 def calibration(confs: list[float], hits: list[int], clusters: list | None) -> list[dict]:
     """For each confidence band: how sure the agent said it was vs how often it was right, with a
-    95% range on the actual rate (batched calls count once). An agent whose stated confidence sits
+    range on the actual rate that holds however often it is checked (batched calls count once). An agent whose stated confidence sits
     outside that range is overconfident or underconfident in that band."""
     out = []
     for lo, hi in CALIBRATION_BANDS:
@@ -277,8 +285,7 @@ def calibration(confs: list[float], hits: list[int], clusters: list | None) -> l
         tries = len(set(cl)) if cl is not None else len(idx)
         stated = sum(confs[i] for i in idx) / len(idx)
         actual = sum(h) / len(h)
-        n_eff = len(h) / design_effect([float(x) for x in h], cl)
-        low, high = wilson_interval(actual * n_eff, n_eff)
+        low, high = confidence_range([float(x) for x in h], cl)
         if tries < CALIBRATION_MIN:
             judged = "too few"
         elif stated > high:
@@ -336,9 +343,10 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
     batches = _batches(hits, cl)
     p, p_worse = luck_odds(batches)
     p, p_worse = min(1.0, p * slices), min(1.0, p_worse * slices)
-    n_eff = n / design_effect([float(h) for h in hits], cl) if n else 0.0
-    hlo, hhi = wilson_interval(hit * n_eff, n_eff)
-    blo, bhi = bss_interval(scored_b, deff=design_effect(scored_b, cl))
+    # Ranges hold however often they are checked, count each try once, and face the same slice bar.
+    hlo, hhi = confidence_range([float(h) for h in hits], cl, 0.05 / slices)
+    bs_lo, bs_hi = confidence_range(scored_b, cl, 0.05 / slices)
+    blo, bhi = 1.0 - bs_hi / COIN_FLIP_BS, 1.0 - bs_lo / COIN_FLIP_BS
     v = verdict(n, len(batches), p, p_worse)
     nxt = NEXT_STEP.get(v)
     return Record(
