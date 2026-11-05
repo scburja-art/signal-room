@@ -133,7 +133,8 @@ def render(line: str, color: bool = True) -> str | None:
             return render_event(json.loads(msg[6:]), when, p)
         except (ValueError, KeyError, TypeError):
             return None
-    who = next((v for k, v in LOGGER_NAMES.items() if logger.startswith(k)), logger.split(".")[-1])
+    who = LOGGER_NAMES.get(logger) or next((v for k, v in LOGGER_NAMES.items() if logger.startswith(k + ".")),
+                                           logger.split(".")[-1])
     gap = re.match(r"gap of (\d+)s since last tick", msg)
     if gap:
         mins = int(gap.group(1)) // 60
@@ -182,7 +183,7 @@ def scoreboard(color: bool = True) -> list[str]:
     """Every bot's standing in one short block, from the database. One header row labels the
     columns so each line holds only values."""
     from . import service
-    from .db import Agent, Read, SessionLocal, Signal
+    from .db import Agent, CreditEntry, SessionLocal, Signal
 
     p = Painter(color)
     db = SessionLocal()
@@ -193,8 +194,10 @@ def scoreboard(color: bool = True) -> list[str]:
                 r = service.public_agent(db, a, None, "90d")
                 bots.append((a, r))
                 continue
-            reads = db.query(Signal.result).join(Read, Read.signal_id == Signal.id).filter(
-                Read.agent_id == a.id, Signal.agent_id != a.id).all()
+            # Paid reads only (an open call bought with credits); reading a closed call is free, so a
+            # bot that only checks closed calls (the verify tool) is not a reader.
+            reads = db.query(Signal.result).join(CreditEntry, CreditEntry.signal_id == Signal.id).filter(
+                CreditEntry.agent_id == a.id, CreditEntry.reason == "read").all()
             if reads:
                 done = [x[0] for x in reads if x[0] in ("right", "wrong")]
                 readers.append((a, len(reads), done.count("right"), len(done), service.balance(db, a.id)))

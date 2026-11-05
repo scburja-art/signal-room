@@ -118,3 +118,24 @@ def test_anchor_lines_in_plain_words():
     assert ok == " 9:50 AM  Room          ⛓ ANCHORED Nov 3's fingerprint of every call is now on the public chain (tx 0x3520d471…)"
     bad = feed.render("2026-11-04 09:51:23,000 WARNING signal_room.scheduler: anchor failed for 2026-10-26: rpc down", color=False)
     assert "couldn't write 2026-10-26's fingerprint yet" in bad and "retrying" in bad
+
+
+def test_each_forecaster_keeps_its_own_name():
+    v1 = feed.render("2026-11-04 22:31:35,821 INFO agents.forecaster: forecaster v1 running as 927b", color=False)
+    v2 = feed.render("2026-11-04 22:31:35,841 INFO agents.forecaster2: forecaster v2 running as cc23", color=False)
+    assert "Forecaster v1" in v1 and "Forecaster v2" not in v1
+    assert "Forecaster v2" in v2 and "Forecaster v1" not in v2
+
+
+def test_free_reads_of_closed_calls_are_not_paid_reads(client, session_factory, monkeypatch):
+    from signal_room import db as dbmod
+    from tests.api_helpers import Agent
+    from tests.test_delisting import post_and_resolve
+    from signal_room.db import Signal
+    monkeypatch.setattr(dbmod, "SessionLocal", session_factory)
+    author = Agent(client, "momentum-control")
+    post_and_resolve(client, session_factory, author, 1, right=True)
+    sig_id = session_factory().query(Signal).first().id
+    verifier = Agent(client, "verifier")
+    assert verifier.get(f"/room/{sig_id}").status_code == 200      # closed call: free
+    assert not any("verifier" in line for line in feed.scoreboard(color=False))
