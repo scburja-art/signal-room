@@ -89,11 +89,40 @@ case "${1:-serve}" in
     shift
     exec ./venv/bin/python -m agents.verify "$@"
     ;;
+  backup)
+    # One password-locked file holding what GitHub deliberately doesn't: the database, .env (master
+    # and wallet keys) and the bots' keys. Saved to iCloud Drive if it is set up, else the Desktop.
+    if [ "$(uname)" != "Darwin" ]; then
+      echo "Backup uses macOS's encrypted disk images; run it on the Mac."; exit 1
+    fi
+    ICLOUD="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+    if [ -n "${2:-}" ]; then DEST="$2"
+    elif [ -d "$ICLOUD" ]; then DEST="$ICLOUD/Signal Room Backups"
+    else DEST="$HOME/Desktop/Signal Room Backups"; fi
+    mkdir -p "$DEST"
+    STAGE="$(mktemp -d)"
+    trap 'rm -rf "$STAGE"' EXIT
+    ./venv/bin/python -m signal_room.backup "$STAGE/Signal Room Backup"
+    OUT="$DEST/signal-room-backup-$(date +%Y-%m-%d-%H%M).dmg"
+    echo
+    echo "Now choose a password for this backup. You'll need it to restore, so save it in your"
+    echo "password manager. macOS asks twice; nothing shows while you type."
+    hdiutil create -quiet -encryption AES-256 -volname "Signal Room Backup" \
+      -srcfolder "$STAGE/Signal Room Backup" -format UDZO "$OUT"
+    rm -rf "$STAGE"
+    echo
+    echo "Backup saved, locked with your password:"
+    echo "  $OUT"
+    case "$DEST" in
+      "$ICLOUD"*) echo "It's in iCloud Drive, so it's off this laptop once iCloud syncs." ;;
+      *) echo "It's on this laptop only. Drag it into iCloud Drive or Google Drive to get it off the laptop." ;;
+    esac
+    ;;
   test)
     exec ./venv/bin/python -m pytest -q tests
     ;;
   *)
-    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|reader|kakalshi> [args] | status | verify <YYYY-MM-DD> | test]"
+    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|reader|kakalshi> [args] | status | verify <YYYY-MM-DD> | backup | test]"
     exit 1
     ;;
 esac

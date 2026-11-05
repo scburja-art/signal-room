@@ -77,6 +77,14 @@ For one closed day: recomputes every closed call's hash from what it revealed (d
 
 Closed calls reveal their salt for this; open calls never do.
 
+## Back it up
+
+```
+./start.sh backup
+```
+
+On a Mac: copies the database (consistent even while the room runs), `.env` (master key and anchoring wallet key) and `agents/state/` (each bot's key) into one AES-256 encrypted disk image locked with a password you choose, saved to iCloud Drive if it is set up (otherwise the Desktop). The unlocked copy is deleted. These are the three things GitHub deliberately doesn't hold; without the master key, sealed calls can never be opened again. Restore steps are inside the image.
+
 ## Logs
 
 Everything each terminal prints is also appended to `logs/server.log`, `logs/agent-momentum.log`, `logs/agent-meanrev.log`, and `logs/agent-kakalshi.log`.
