@@ -125,3 +125,31 @@ def test_always_long_baseline():
     # +1% then -2% held long: 1.01 x 0.98 - 1 = -1.02%.
     rec = scoring.record([0.04, 0.04], ["right", "right"], [0.0, 0.0], long_returns=[0.01, -0.02])
     assert rec.always_long_return == pytest.approx(-0.0102)
+
+
+def test_migration_makes_old_price_column_nullable(tmp_path):
+    """Live failure 2026-11-05: the old table kept NOT NULL on price_at_submit, so every rule-set-3 post
+    failed its insert and the room posted nothing for nine hours."""
+    from sqlalchemy import create_engine, text
+    from signal_room.db import init_db
+    eng = create_engine(f"sqlite:///{tmp_path}/old.db")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE agents (id VARCHAR(32) PRIMARY KEY, wallet VARCHAR(64), api_key_hash VARCHAR(64), name VARCHAR(64), status VARCHAR(16), delist_count INTEGER, created_at DATETIME)"))
+        c.execute(text("CREATE TABLE signals (id VARCHAR(32) PRIMARY KEY, agent_id VARCHAR(32), pair VARCHAR(8), horizon VARCHAR(4), body_cipher TEXT, hash VARCHAR(64), submitted_at DATETIME, resolve_at DATETIME, price_at_submit FLOAT NOT NULL, resolved_at DATETIME, price_at_resolve FLOAT, direction VARCHAR(5), confidence FLOAT, result VARCHAR(5), brier FLOAT, net_return FLOAT, credit FLOAT)"))
+        c.execute(text("CREATE TABLE reference_prices (id INTEGER PRIMARY KEY, pair VARCHAR(8), price FLOAT, feeds_used INTEGER, sampled_at DATETIME)"))
+        c.execute(text("CREATE TABLE daily_logs (day VARCHAR(10) PRIMARY KEY, merkle_root VARCHAR(64), signal_count INTEGER, anchored_tx VARCHAR(80), created_at DATETIME)"))
+        c.execute(text("INSERT INTO signals (id, agent_id, pair, horizon, body_cipher, hash, submitted_at, resolve_at, price_at_submit, resolved_at, result, brier, credit) VALUES "
+                       "('r1','a','BTC','1h','c','h','2026-10-29 10:00','2026-10-29 11:00',1.5,'2026-10-29 11:00','right',0.04,0.84)"))
+    init_db(eng)
+    init_db(eng)   # idempotent
+    with eng.begin() as c:
+        c.execute(text("INSERT INTO signals (id, agent_id, pair, horizon, body_cipher, hash, submitted_at, resolve_at, price_at_submit, hash_version) VALUES "
+                       "('n1','a','BTC','15m','c','h2','2026-11-05 10:00','2026-11-05 10:15',NULL,3)"))
+        rows = c.execute(text("SELECT id, price_at_submit, hash_version, scoring_version FROM signals ORDER BY id")).fetchall()
+        assert rows == [("n1", None, 3, None), ("r1", 1.5, 2, 2)]
+        # the one-open rule survived the rebuild
+        import pytest
+        from sqlalchemy.exc import IntegrityError
+        with pytest.raises(IntegrityError):
+            c.execute(text("INSERT INTO signals (id, agent_id, pair, horizon, body_cipher, hash, submitted_at, resolve_at, hash_version) VALUES "
+                           "('n2','a','BTC','15m','c','h3','2026-11-05 10:01','2026-11-05 10:16',3)"))

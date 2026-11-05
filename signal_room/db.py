@@ -227,6 +227,30 @@ def _migrate(eng) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_one_open ON signals (agent_id, pair, horizon) "
             "WHERE resolved_at IS NULL"
         ))
+    # Rule set 3 (2026-11-05) made price_at_submit nullable. SQLite keeps the NOT NULL from the original
+    # CREATE TABLE whatever the model says, and every post then failed its insert (seen live: nine hours
+    # of 409s). SQLite cannot alter a column, so rebuild the table with the current schema.
+    price_col = next(c for c in inspect(eng).get_columns("signals") if c["name"] == "price_at_submit")
+    if not price_col["nullable"]:
+        _rebuild_signals(eng)
+
+
+def _rebuild_signals(eng) -> None:
+    from sqlalchemy import inspect, text
+    from sqlalchemy.schema import CreateIndex, CreateTable
+    table = Base.metadata.tables["signals"]
+    cols = ", ".join(c["name"] for c in inspect(eng).get_columns("signals"))
+    with eng.begin() as conn:
+        conn.execute(text("ALTER TABLE signals RENAME TO signals_old"))
+        conn.execute(CreateTable(table))
+        conn.execute(text(f"INSERT INTO signals ({cols}) SELECT {cols} FROM signals_old"))
+        conn.execute(text("DROP TABLE signals_old"))
+        for ix in table.indexes:
+            conn.execute(CreateIndex(ix))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_one_open ON signals (agent_id, pair, horizon) "
+            "WHERE resolved_at IS NULL"
+        ))
 
 
 def get_session():

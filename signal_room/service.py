@@ -92,9 +92,12 @@ def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction:
     db.add(sig)
     try:
         db.commit()
-    except IntegrityError:  # lost a race with a concurrent post for the same pair/horizon
+    except IntegrityError as e:
         db.rollback()
-        raise HTTPException(409, "one open signal per pair per horizon")
+        if "ux_signal_one_open" in str(e.orig) or "UNIQUE" in str(e.orig).upper():
+            raise HTTPException(409, "one open signal per pair per horizon")   # lost a race with a concurrent post
+        log.error("signal insert failed: %s", e.orig)   # a schema problem, never to be reported as 'already open'
+        raise HTTPException(500, "the room could not store the signal; see the server log")
     event("posted", agent=agent.name or agent.id, pair=pair, horizon=horizon, closes=sig.resolve_at.isoformat())
     return sig
 
