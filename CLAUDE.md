@@ -27,6 +27,7 @@
 - Log deviations from `SPEC.md` in `implementation-notes.md` under "Deviations".
 - HQ-worthy work (decisions, notable numbers, shipped features, in plain English) also gets filed in the HQ vault, `~/Stove Codes/HQ/Signal Room/`: update the dashboard, add a decision note to `Data Bank/Decisions/`, add the INDEX line, per HQ's own CLAUDE.md.
 - A bot loop that runs on a schedule must remember the last slot it ran and never run it twice; test it (forecaster v2 re-posted its slot for 50 s on its first night).
+- Any database schema change is run against a copy of the live database (with its -wal file) and a post is made through the API on that copy before the user is told to restart. SQLite keeps the original CREATE TABLE's constraints whatever the model says (rule set 3 made a column nullable; the live table still said NOT NULL and the room posted nothing for nine hours).
 - When corrected, add a rule here so the mistake does not recur. Keep this file short.
 
 ## Commits
