@@ -260,6 +260,8 @@ class Record:
     skill_points: int = 0          # skill on a readable scale: BSS x 100, 0 = coin flip
     next_verdict: str | None = None
     tries_to_next: int | None = None   # projection, if the next stretch looks like the record so far
+    competitors: int = 1               # ranked agents on the board this record competes on
+    p_luck_alone: float = 1.0          # the luck odds before the competitors correction
     exploratory: bool = False      # a slice (one coin or one time window): the bar is raised per slice
     always_long_return: float = 0.0   # the same windows, same cost, always calling long: the no-skill baseline
     calibration: list = field(default_factory=list)   # per confidence band: stated vs actual
@@ -312,7 +314,8 @@ def compounded(returns: list[float]) -> float:
 
 
 def record(briers: list[float | None], results: list[str], returns: list[float],
-           clusters: list | None = None, slices: int = 1, long_returns: list[float] | None = None) -> Record:
+           clusters: list | None = None, slices: int = 1, long_returns: list[float] | None = None,
+           competitors: int = 1) -> Record:
     """briers/results/clusters are parallel lists over resolved signals; returns covers those with
     a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved under
     rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
@@ -320,7 +323,10 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
     slices: how many slices of the agent's record this one is one of (e.g. 4 coins). Looking at many
     slices and keeping the best is how a lucky slice gets mistaken for skill, so the luck odds are
     multiplied by the number of slices (Bonferroni) and the record is marked exploratory.
-    long_returns: what always calling long would have made over the same windows at the same cost."""
+    long_returns: what always calling long would have made over the same windows at the same cost.
+    competitors: how many ranked agents share the board. Readers pick the best of them, and among K
+    coin-flippers the best one looks skilled about K times as often, so the luck odds are multiplied
+    by K (Bonferroni) before the verdict; p_luck_alone keeps the uncorrected odds."""
     keep = [i for i, r in enumerate(results) if r in ("right", "wrong")]
     scored_b = [briers[i] for i in keep]
     hits = [1 if results[i] == "right" else 0 for i in keep]
@@ -347,10 +353,12 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
             #                      not multiplied by sqrt(n), which would make it a t-statistic that grows with n.
     batches = _batches(hits, cl)
     p, p_worse = luck_odds(batches)
-    p, p_worse = min(1.0, p * slices), min(1.0, p_worse * slices)
-    # Ranges hold however often they are checked, count each try once, and face the same slice bar.
-    hlo, hhi = confidence_range([float(h) for h in hits], cl, 0.05 / slices)
-    bs_lo, bs_hi = confidence_range(scored_b, cl, 0.05 / slices)
+    p_alone = p
+    bar = slices * max(1, competitors)
+    p, p_worse = min(1.0, p * bar), min(1.0, p_worse * bar)
+    # Ranges hold however often they are checked, count each try once, and face the same raised bar.
+    hlo, hhi = confidence_range([float(h) for h in hits], cl, 0.05 / bar)
+    bs_lo, bs_hi = confidence_range(scored_b, cl, 0.05 / bar)
     blo, bhi = 1.0 - bs_hi / COIN_FLIP_BS, 1.0 - bs_lo / COIN_FLIP_BS
     v = verdict(n, len(batches), p, p_worse)
     nxt = NEXT_STEP.get(v)
@@ -361,10 +369,10 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         p_luck=round(p, 6), hit_rate_low=round(hlo, 4), hit_rate_high=round(hhi, 4),
         bss_low=round(blo, 4), bss_high=round(bhi, 4),
         tries=len(batches), p_worse=round(p_worse, 6), verdict=v, skill_points=round(bss * 100),
-        next_verdict=nxt, tries_to_next=tries_to_reach(batches, LADDER[nxt] / slices) if nxt else None,
-        exploratory=slices > 1,
+        next_verdict=nxt, tries_to_next=tries_to_reach(batches, LADDER[nxt] / bar) if nxt else None,
+        exploratory=slices > 1, competitors=max(1, competitors), p_luck_alone=round(min(1.0, p_alone), 6),
         always_long_return=round(compounded(long_returns or []), 6),
-        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl, 0.05 / slices),
+        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl, 0.05 / bar),
     )
 
 

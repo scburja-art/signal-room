@@ -163,7 +163,9 @@ def make_engine(url: str | None = None):
     url = url or config.DATABASE_URL
     kwargs = {}
     if url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
+        # Wait up to 30 s for a writer to finish instead of SQLite's 5 s default: the API, the tick and the
+        # anchor thread all write, and four posts failed "database is locked" on 2026-11-05 at 02:09.
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
     engine = create_engine(url, **kwargs)
     if url.startswith("sqlite"):
         @event.listens_for(engine, "connect")

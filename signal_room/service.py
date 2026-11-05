@@ -264,12 +264,24 @@ def _resolved_query(db: Session, agent_id: str, horizon: str | None, since: dt.d
     return q.order_by(Signal.resolved_at)
 
 
-def _record(rows: list[Signal], slices: int = 1, now: dt.datetime | None = None) -> dict:
+def board_size(db: Session, since: dt.datetime | None) -> int:
+    """How many active agents have enough scored calls in the window to be ranked: the field a reader
+    picks the best of. At least 1 (the agent itself)."""
+    q = (db.query(Signal.agent_id).join(Agent, Agent.id == Signal.agent_id)
+         .filter(Agent.status == "active", Signal.result.in_(("right", "wrong"))))
+    if since:
+        q = q.filter(Signal.resolved_at >= since)
+    counts = q.group_by(Signal.agent_id).having(func.count(Signal.id) >= config.MIN_RESOLVED_FOR_RANK).all()
+    return max(1, len(counts))
+
+
+def _record(rows: list[Signal], slices: int = 1, now: dt.datetime | None = None, competitors: int = 1) -> dict:
     clusters = scoring.cluster_ids([(s.start_at or s.submitted_at, s.resolve_at) for s in rows])
     long_returns = [(s.price_at_resolve - s.price_at_submit) / s.price_at_submit - config.ROUND_TRIP_COST
                     for s in rows if s.net_return is not None and s.price_at_resolve and s.price_at_submit]
     rec = scoring.record([s.brier for s in rows], [s.result for s in rows],
-                         [s.net_return for s in rows if s.net_return is not None], clusters, slices, long_returns)
+                         [s.net_return for s in rows if s.net_return is not None], clusters, slices, long_returns,
+                         competitors)
     out = rec.__dict__.copy()
     # Tries per day so far turns the projected tries into days.
     out["days_to_next"] = None
@@ -298,7 +310,8 @@ def _slices(db: Session, agent_id: str, since: dt.datetime | None, horizon: str 
 def agent_record(db: Session, agent_id: str, horizon: str | None = None, window: str = "90d") -> dict:
     since = _since(window)
     rows = _resolved_query(db, agent_id, horizon, since).all()
-    return {"horizon": horizon or "all", "window": window, **_record(rows, _slices(db, agent_id, since, horizon, None))}
+    return {"horizon": horizon or "all", "window": window,
+            **_record(rows, _slices(db, agent_id, since, horizon, None), competitors=board_size(db, since))}
 
 
 def public_agent(db: Session, agent: Agent, horizon: str | None, window: str) -> dict:
@@ -311,12 +324,13 @@ def public_agent(db: Session, agent: Agent, horizon: str | None, window: str) ->
 def leaderboard(db: Session, horizon: str | None, pair: str | None, window: str, limit: int = 100) -> list[dict]:
     agents = db.query(Agent).filter(Agent.status == "active").all()
     since = _since(window)
+    field = board_size(db, since)
     out = []
     for a in agents:
         q = _resolved_query(db, a.id, horizon, since)
         if pair:
             q = q.filter(Signal.pair == pair)
-        rec = _record(q.all(), _slices(db, a.id, since, horizon, pair))
+        rec = _record(q.all(), _slices(db, a.id, since, horizon, pair), competitors=field)
         if rec["ranked"]:
             out.append({"agent_id": a.id, "name": a.name, **rec})
     out.sort(key=lambda r: r["score"], reverse=True)

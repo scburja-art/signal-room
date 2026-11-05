@@ -73,3 +73,13 @@ def test_report_quiet_room(session_factory):
     assert "no bot closed a call in this window" in text
     assert "nothing anchored yet" in text
     assert "price sampler is not running" in text
+
+
+def test_weekly_report_has_a_day_by_day_line(client, session_factory):
+    good = ApiAgent(client, "momentum-control")
+    post_and_resolve(client, session_factory, good, 8, right=True, confidence=0.6)
+    now = dt.datetime(2026, 11, 5, 12, 0)
+    spread(session_factory, minutes=600, end=now - dt.timedelta(hours=1))   # 8 calls, 10 hours apart, over ~3 days
+    text = report.report(session_factory(), now=now, days=7)
+    assert "Signal Room, last 7 days" in text and "By day (right/closed, all bots):" in text
+    assert text.count("\n  2026-11-0") >= 3 and "8 new calls, 8 closed: 8 right, 0 wrong" in text

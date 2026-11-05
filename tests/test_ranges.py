@@ -68,3 +68,49 @@ def test_empty():
     assert scoring.confidence_range([], None) == (0.0, 1.0)
     rec = scoring.record([], [], [])
     assert (rec.hit_rate_low, rec.hit_rate_high, rec.bss_low, rec.bss_high) == (0.0, 1.0, -3.0, 1.0)
+
+
+def test_competitors_raise_the_bar_by_hand():
+    # 12 right out of 12, each its own try. Alone: bankroll = mean over stakes of (1+c)^12
+    # = (3.14 + 8.92 + 23.3 + 56.7 + 129.7) / 5 = 44.36 → p = 1/44.36.
+    briers, results = [0.04] * 12, ["right"] * 12
+    alone = scoring.record(briers, results, [])
+    assert alone.p_luck == pytest.approx(1 / 44.358, rel=1e-3) and alone.competitors == 1
+    four = scoring.record(briers, results, [], competitors=4)
+    assert four.p_luck_alone == alone.p_luck and four.p_luck == pytest.approx(4 * alone.p_luck, rel=1e-4)
+    assert four.competitors == 4
+    # Ranges face the same raised bar: wider with competitors.
+    assert four.hit_rate_low < alone.hit_rate_low
+    # 28 right of 32 alone is Proven (p ≈ 1/1,475, under 1/1,000); among 10 competitors the same record
+    # is 1/148: Probably not luck. 24 of 32 (1/34 alone) drops from Probably not luck to Luck among 10.
+    briers, results = [0.04] * 28 + [0.36] * 4, ["right"] * 28 + ["wrong"] * 4
+    big, ten = scoring.record(briers, results, []), scoring.record(briers, results, [], competitors=10)
+    assert big.verdict == "proven" and ten.verdict == "probably_not_luck"
+    assert ten.p_luck == pytest.approx(10 * big.p_luck, rel=1e-3)
+    briers, results = [0.04] * 24 + [0.36] * 8, ["right"] * 24 + ["wrong"] * 8
+    assert scoring.record(briers, results, []).verdict == "probably_not_luck"
+    assert scoring.record(briers, results, [], competitors=10).verdict == "luck"
+    # A coin-flip record is not made worse than "no evidence" by the correction (capped at 1).
+    flip = scoring.record([0.25] * 30, ["right", "wrong"] * 15, [], competitors=50)
+    assert flip.p_luck == 1.0
+
+
+def test_board_size_counts_ranked_active_agents(client, session_factory):
+    from signal_room import service
+    from signal_room.db import Agent as AgentRow
+    from tests.api_helpers import Agent
+    from tests.test_delisting import post_and_resolve
+    from tests.conftest import spread
+    a, b, c = Agent(client, "a"), Agent(client, "b"), Agent(client, "c")
+    post_and_resolve(client, session_factory, a, 30, right=True)
+    post_and_resolve(client, session_factory, b, 30, right=True)
+    post_and_resolve(client, session_factory, c, 5, right=True)       # under 30: not on the board
+    spread(session_factory)
+    db = session_factory()
+    assert service.board_size(db, service._since("90d")) == 2
+    rec = a.get(f"/agents/{a.id}").json()
+    assert rec["competitors"] == 2 and rec["p_luck"] == pytest.approx(min(1.0, 2 * rec["p_luck_alone"]), rel=1e-5)
+    # A delisted agent leaves the field.
+    db.query(AgentRow).filter_by(id=b.id).first().status = "delisted"
+    db.commit()
+    assert service.board_size(db, service._since("90d")) == 1

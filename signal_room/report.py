@@ -69,11 +69,12 @@ def bot_lines(db, agent: Agent, start: dt.datetime, end: dt.datetime) -> list[st
     return out
 
 
-def report(db, day: dt.date | None = None, now: dt.datetime | None = None) -> str:
+def report(db, day: dt.date | None = None, now: dt.datetime | None = None, days: int = 1) -> str:
     if day is None:
         end = now or utcnow()
-        start = end - dt.timedelta(hours=24)
-        title = f"Signal Room, last 24 hours (to {dt.datetime.now().strftime('%a %b %d %H:%M')} local)"
+        start = end - dt.timedelta(days=days)
+        span = "last 24 hours" if days == 1 else f"last {days} days"
+        title = f"Signal Room, {span} (to {dt.datetime.now().strftime('%a %b %d %H:%M')} local)"
     else:
         start = dt.datetime.combine(day, dt.time())
         end = start + dt.timedelta(days=1)
@@ -121,23 +122,34 @@ def report(db, day: dt.date | None = None, now: dt.datetime | None = None) -> st
     last_price = db.query(func.max(ReferencePrice.sampled_at)).scalar()
     if last_price is None or (utcnow() - last_price).total_seconds() > config.PRICE_MAX_AGE_SECONDS:
         lines.append("  WARNING: the price sampler is not running right now. Start the room with: room")
-    lines.append("")
+    if days > 1:
+        lines.append("By day (right/closed, all bots):")
+        d = start.date()
+        while d < end.date() + dt.timedelta(days=1):
+            lo, hi = max(start, dt.datetime.combine(d, dt.time())), min(end, dt.datetime.combine(d, dt.time()) + dt.timedelta(days=1))
+            q = db.query(Signal).filter(Signal.resolved_at >= lo, Signal.resolved_at < hi)
+            r, w = q.filter(Signal.result == "right").count(), q.filter(Signal.result == "wrong").count()
+            lines.append(f"  {d.isoformat()}  {bar(r / (r + w)) if r + w else '·' * BAR}  {r}/{r + w}")
+            d += dt.timedelta(days=1)
+        lines.append("")
     lines.append("One day is a small sample: a coin-flipper lands anywhere from 35% to 65% on a day of 40 calls."
                  " The verdicts are what count.")
     return "\n".join(lines)
 
 
 def main(argv: list[str]) -> None:
-    day = None
-    if argv:
+    day, days = None, 1
+    if argv and argv[0] == "week":
+        days = 7
+    elif argv:
         try:
             day = dt.date.fromisoformat(argv[0])
         except ValueError:
-            print("usage: ./start.sh report [YYYY-MM-DD]")
+            print("usage: ./start.sh report [YYYY-MM-DD | week]")
             sys.exit(1)
     db = SessionLocal()
     try:
-        print(report(db, day))
+        print(report(db, day, days=days))
     finally:
         db.close()
 

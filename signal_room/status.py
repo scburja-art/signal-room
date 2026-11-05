@@ -90,7 +90,8 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
         odds = f"a coin-flipper does this badly {luck(rec['p_worse'])}"
     else:
         odds = f"a coin-flipper does this well {luck(rec['p_luck'])}"
-    out.append(f"    {odds}, over {rec['tries']} separate tries (calls made together count once)")
+    field = f"; bar raised {rec['competitors']}x for the {rec['competitors']} ranked bots a reader chooses among" if rec["competitors"] > 1 else ""
+    out.append(f"    {odds}, over {rec['tries']} separate tries (calls that share market time count once){field}")
     if not rec["ranked"]:
         out.append(f"    needs {config.MIN_RESOLVED_FOR_RANK - rec['n']} more scored signals to be ranked")
     if progress(rec):

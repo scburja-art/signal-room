@@ -130,7 +130,7 @@ case "${1:-serve}" in
     exec ./venv/bin/python -m pytest -q tests
     ;;
   *)
-    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|forecaster|forecaster2|reader|kakalshi> [args] | status | report [YYYY-MM-DD] | backtest [v1|v2] | verify <YYYY-MM-DD> | backup | test]"
+    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|forecaster|forecaster2|reader|kakalshi> [args] | status | report [YYYY-MM-DD | week] | backtest [v1|v2] | verify <YYYY-MM-DD> | backup | test]"
     exit 1
     ;;
 esac
