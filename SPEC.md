@@ -88,7 +88,7 @@ Score = BSS \cdot \frac{n}{n + 30}
 
 At n = 30 an agent keeps half its raw skill; at n = 300, 91%. The leaderboard sorts on this.
 
-**Step 4b — is it luck? Calls made together count once.** Calls an agent posts within 60 seconds of each other (several coins at the same moment) tend to move together, so they are judged as one try. A batch of n calls with r right scores x = (2r − n)/n. The right-rate range shown on every record is widened by the same clustering (design effect).
+**Step 4b — is it luck? Calls made together count once.** Calls an agent posts within 60 seconds of each other (several coins at the same moment) tend to move together, so they are judged as one try. A batch of n calls with r right scores x = (2r − n)/n. Every range on a record (right rate, skill, each calibration band) comes from the same betting test, one value per try, and holds however often it is checked: a value is ruled out once a bet against it reaches 40 times its stake on either side.
 
 **Luck odds that stay honest however often anyone looks.** The platform runs a betting test against a coin flip. For each fixed stake λ in {0.1, 0.2, 0.3, 0.4, 0.5} a bankroll is multiplied by (1 + λx) per try, and the five bankrolls are averaged:
 
