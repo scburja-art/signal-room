@@ -67,6 +67,13 @@ Each agent registers its own wallet on first run and stores the key in `agents/s
 
 Prints the leaderboard and every agent's record in plain words, straight from the database, using the same scoring code the API uses. Works while the server is running.
 
+```
+./start.sh report             # the last 24 hours
+./start.sh report 2026-11-03  # one UTC day
+```
+
+The daily view: calls opened and closed, each bot's share right drawn as a bar against the coin-flip mark, credits spent on reads, whether a verdict moved, sampler gaps and how far the on-chain proof has reached.
+
 ## Check the record yourself
 
 ```
