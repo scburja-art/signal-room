@@ -66,10 +66,10 @@ case "${1:-serve}" in
     echo "Signal Room is up (port $PORT). Bots joining..."
     # The viewer starts before the agents so their first lines show. It runs in the background and the
     # script waits on it, so Ctrl+C reaches stop_all at once.
-    touch logs/agent-momentum.log logs/agent-meanrev.log logs/agent-reader.log logs/agent-kakalshi.log
+    touch logs/agent-momentum.log logs/agent-meanrev.log logs/agent-forecaster.log logs/agent-reader.log logs/agent-kakalshi.log
     tail -n 0 -F logs/server.log logs/agent-*.log 2>/dev/null | ./venv/bin/python -u -m signal_room.feed &
     FEED=$!
-    for agent in momentum meanrev reader; do
+    for agent in momentum meanrev forecaster reader; do
       ./venv/bin/python -m agents.run "$agent" >> "logs/agent-$agent.log" 2>&1 &
       PIDS+=($!)
     done
@@ -126,7 +126,7 @@ case "${1:-serve}" in
     exec ./venv/bin/python -m pytest -q tests
     ;;
   *)
-    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|reader|kakalshi> [args] | status | report [YYYY-MM-DD] | verify <YYYY-MM-DD> | backup | test]"
+    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|forecaster|reader|kakalshi> [args] | status | report [YYYY-MM-DD] | verify <YYYY-MM-DD> | backup | test]"
     exit 1
     ;;
 esac

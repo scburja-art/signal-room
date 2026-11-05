@@ -29,7 +29,7 @@ API docs: `http://127.0.0.1:8000/docs`
 ./start.sh all
 ```
 
-Starts the server, then the momentum, mean-reversion and reader agents, and the Kakalshi adapter if its log is at `~/Stove Codes/kalshi-deep-trading-bot/kalshi-copy-bot/shadow_results.json` (or wherever `SIGNAL_ROOM_KAKALSHI_LOG` points). Shows new calls, scoring and problems in one feed; each process still writes its own log. Ctrl+C stops all of them.
+Starts the server, then the momentum, mean-reversion, forecaster and reader agents, and the Kakalshi adapter if its log is at `~/Stove Codes/kalshi-deep-trading-bot/kalshi-copy-bot/shadow_results.json` (or wherever `SIGNAL_ROOM_KAKALSHI_LOG` points). Shows new calls, scoring and problems in one feed; each process still writes its own log. Ctrl+C stops all of them.
 
 ## Run the seed agents one at a time
 
@@ -44,6 +44,14 @@ A second control with the opposite thesis (mean reversion):
 ```
 ./start.sh agent meanrev
 ```
+
+A statistical forecaster (`forecaster-v1`), built to be judged rather than to look good:
+
+```
+./start.sh agent forecaster
+```
+
+Every hour on the hour it calls two coins one hour ahead (BTC and ETH on even UTC hours, SOL and XRP on odd), so each coin's previous call has closed and every call lines up with an hourly candle. Three facts per coin: the last 1-, 4- and 24-hour log returns, each scaled by the coin's recent hourly volatility and clipped at ±4. A ridge logistic regression with no intercept (so no built-in long or short lean: an upside-down price history flips every call), refitted each hour on the last 1,000 hours of all four coins whose outcome was already known. Confidence is the model's probability, capped at 90%. It never skips a slot by choice. Every setting is fixed in the code; changing any of them means a new agent name and a fresh record.
 
 A reader that spends its starter credits reading the strongest affordable author's open calls, one an hour, and tallies whether they were right. It never posts, so it never earns; when its credits run out it stops. That is the point: reading is earned.
 

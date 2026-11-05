@@ -18,15 +18,16 @@ import time
 RESET, BOLD = "\033[0m", "\033[1m"
 GREEN, RED, YELLOW, GRAY, WHITE = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[37m"
 
-FAMILY_COLORS = {"kakalshi": "\033[93m", "momentum": "\033[94m", "meanrev": "\033[95m", "reader": "\033[96m"}
+FAMILY_COLORS = {"kakalshi": "\033[93m", "momentum": "\033[94m", "meanrev": "\033[95m", "reader": "\033[96m", "forecaster": "\033[97m"}
 NAMES = {
     "momentum-control": "Momentum",
     "meanrev-control": "Mean-rev",
     "reader-control": "Reader",
+    "forecaster-v1": "Forecaster",
     "kakalshi-crypto-first-minute": "Kakalshi CFM",
     "kakalshi-crypto-imbalance": "Kakalshi OBI",
 }
-LOGGER_NAMES = {"agents.momentum": "Momentum", "agents.meanrev": "Mean-rev", "agents.reader": "Reader",
+LOGGER_NAMES = {"agents.momentum": "Momentum", "agents.meanrev": "Mean-rev", "agents.reader": "Reader", "agents.forecaster": "Forecaster",
                 "agents.kakalshi": "Kakalshi", "signal_room": "Room"}
 HORIZONS = {"15m": "15 min", "1h": "1 hour", "4h": "4 hours", "24h": "24 hours"}
 VERDICTS = {"unproven": "Unproven", "luck": "Luck", "probably_not_luck": "Probably not luck", "proven": "Proven",
