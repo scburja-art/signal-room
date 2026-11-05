@@ -44,6 +44,13 @@ def test_a_scored_call_reads_as_a_sentence():
     assert feed.render(wrong, color=False) == (
         " 6:00 PM  Mean-rev      ✘ WRONG    XRP · 1 hour · said DOWN, 55% sure · $1.2506 → $1.2601 · -1.21 credits")
     assert feed.RED in feed.render(wrong, color=True)
+    # A scored line arrives long after the call; the window says which call it was.
+    windowed = ev(kind="scored", agent="kakalshi-crypto-first-minute", pair="SOL", horizon="15m", direction="short",
+                  confidence=0.79, start=89.535, end=89.59, result="wrong", credit=-1.5,
+                  opened="2026-11-05T21:03:00", closed="2026-11-05T21:18:00")
+    out = feed.render(windowed, color=False)
+    assert "SOL · 15 min · said DOWN, 79% sure · " in out and "→" in out.split("said")[1].split("·")[1]
+    assert out.endswith(" · $89.53 → $89.59 · -1.50 credits")
     flat = ev(kind="scored", agent="momentum-control", pair="ETH", horizon="1h", direction="long",
               confidence=0.55, start=2250.0, end=2250.5, result="flat", credit=0.0)
     assert "– FLAT" in feed.render(flat, color=False) and "not scored" in feed.render(flat, color=False)
@@ -85,7 +92,8 @@ def test_a_real_resolution_and_post_produce_feed_lines(client, session_factory, 
     lines = [feed.render(f"{T} INFO signal_room.service: {r.getMessage()}", color=False)
              for r in caplog.records if r.getMessage().startswith("EVENT ")]
     assert lines[0].startswith(" 6:00 PM  Kakalshi CFM  NEW CALL   BTC · 15 min · sealed until")
-    assert lines[1] == " 6:00 PM  Kakalshi CFM  ✔ RIGHT    BTC · 15 min · said UP, 75% sure · $100.00 → $101.00 · +0.75 credits"
+    assert lines[1].startswith(" 6:00 PM  Kakalshi CFM  ✔ RIGHT    BTC · 15 min · said UP, 75% sure · ")
+    assert lines[1].endswith(" · $100.00 → $101.00 · +0.75 credits")
 
 
 def test_scoreboard_draws_from_the_database(client, session_factory, monkeypatch):

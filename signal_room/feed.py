@@ -96,6 +96,8 @@ def render_event(e: dict, when: str, p: Painter) -> str | None:
             return p.row(when, who, "– VOID", GRAY, f"{where} · no price could be found, not scored")
         said = f"said {'UP' if e['direction'] == 'long' else 'DOWN'}, {e['confidence'] * 100:.0f}% sure"
         moved = f"{money(e['start'])} → {money(e['end'])}"
+        if e.get("opened"):   # which call this was: the window the room scored, in local time
+            moved = f"{local(e['opened'])}→{local(e['closed'])} · {moved}"
         if result == "flat":
             return p.row(when, who, "– FLAT", GRAY, f"{where} · {said} · {moved} · barely moved, not scored")
         badge, code = ("✔ RIGHT", GREEN + BOLD) if result == "right" else ("✘ WRONG", RED + BOLD)

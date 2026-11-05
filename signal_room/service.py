@@ -214,7 +214,8 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
     db.commit()
     # After resolution the call is public record, so it may be shown.
     event("scored", agent=_name(db, sig.agent_id), pair=sig.pair, horizon=sig.horizon, direction=direction,
-          confidence=confidence, start=sig.price_at_submit, end=ref.price, result=result, credit=sig.credit)
+          confidence=confidence, start=sig.price_at_submit, end=ref.price, result=result, credit=sig.credit,
+          opened=(sig.start_at or sig.submitted_at).isoformat(), closed=sig.resolve_at.isoformat())
     return True
 
 
