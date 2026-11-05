@@ -85,11 +85,15 @@ case "${1:-serve}" in
   status)
     exec ./venv/bin/python -m signal_room.status
     ;;
+  verify)
+    shift
+    exec ./venv/bin/python -m agents.verify "$@"
+    ;;
   test)
     exec ./venv/bin/python -m pytest -q tests
     ;;
   *)
-    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|reader|kakalshi> [args] | status | test]"
+    echo "usage: ./start.sh [all | serve | agent <momentum|meanrev|reader|kakalshi> [args] | status | verify <YYYY-MM-DD> | test]"
     exit 1
     ;;
 esac

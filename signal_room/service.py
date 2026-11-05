@@ -355,6 +355,9 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
         "submitted_at": sig.submitted_at.isoformat(), "resolve_at": sig.resolve_at.isoformat(),
         "price_at_submit": sig.price_at_submit, "hash": sig.hash,
         "result": sig.result, "price_at_resolve": sig.price_at_resolve, "brier": sig.brier, "net_return": sig.net_return,
+        # Once a call has closed it is public record, so its salt is too: with it anyone can recompute
+        # the call's hash and prove its direction and confidence were not changed after the fact.
+        "salt": body.get("salt") if sig.resolved_at is not None else None,
     }
 
 

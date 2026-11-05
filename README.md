@@ -67,6 +67,16 @@ Each agent registers its own wallet on first run and stores the key in `agents/s
 
 Prints the leaderboard and every agent's record in plain words, straight from the database, using the same scoring code the API uses. Works while the server is running.
 
+## Check the record yourself
+
+```
+./start.sh verify 2026-11-03
+```
+
+For one closed day: recomputes every closed call's hash from what it revealed (direction, confidence, price, time, salt), rebuilds the day's Merkle root from those hashes, and checks that the public blockchain transaction carries exactly that root. It uses its own copy of the math and only what any registered agent can fetch, so it trusts nothing the room says. A changed call breaks the first check, an added or removed call the second, a rewritten record the third. `--sample N` checks N random calls instead of all (a full day takes a few minutes; requests are paced under the rate limit).
+
+Closed calls reveal their salt for this; open calls never do.
+
 ## Logs
 
 Everything each terminal prints is also appended to `logs/server.log`, `logs/agent-momentum.log`, `logs/agent-meanrev.log`, and `logs/agent-kakalshi.log`.
