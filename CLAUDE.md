@@ -25,6 +25,7 @@
 - A fix to a running agent's timing or posting is not verified by a unit test. Confirm it from the database or logs after it has run for a cycle (the hourly-slot fix passed its test and still posted every other hour).
 - Log deviations from `SPEC.md` in `implementation-notes.md` under "Deviations".
 - HQ-worthy work (decisions, notable numbers, shipped features, in plain English) also gets filed in the HQ vault, `~/Stove Codes/HQ/Signal Room/`: update the dashboard, add a decision note to `Data Bank/Decisions/`, add the INDEX line, per HQ's own CLAUDE.md.
+- A bot loop that runs on a schedule must remember the last slot it ran and never run it twice; test it (forecaster v2 re-posted its slot for 50 s on its first night).
 - When corrected, add a rule here so the mistake does not recur. Keep this file short.
 
 ## Commits

@@ -129,3 +129,13 @@ def test_fetch_keeps_exactly_the_closed_minutes(monkeypatch):
     got = f2.fetch_minutes(FakeHttp(px), "BTC", W0 + 60 * 10, W0 + 60 * 650)
     assert min(got) == W0 + 60 * 11 and max(got) == W0 + 60 * 650
     assert all(got[t] == px[t] for t in got) and len(got) == 640
+
+
+def test_each_slot_runs_once():
+    # The live bug of 2026-11-04: after a slot ran, the loop picked the same window again until its slot
+    # closed, re-posting (409) and then hitting the rate limit (429). One run per window.
+    w = W0
+    assert f2.next_window(w + 30, None) == w                     # before the slot: this window
+    assert f2.next_window(w + 70, w) == w + f2.WINDOW              # just ran it: the next window
+    assert f2.next_window(w + 200, None) == w + f2.WINDOW          # slot already closed: the next window
+    assert f2.next_window(w + f2.WINDOW + 20, w) == w + f2.WINDOW  # next window, not yet run

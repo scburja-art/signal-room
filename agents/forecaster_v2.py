@@ -202,10 +202,17 @@ def main(base_url: str, state_path: str) -> None:
         except Exception as e:
             log.warning("price history load failed, retrying in a minute: %s", e)
             time.sleep(60)
+    done = None
     while True:
-        now = time.time()
-        w = int(now // WINDOW) * WINDOW
-        if now > w + FIRST + POST_AFTER_SECONDS + MAX_WAIT_SECONDS:   # too late for this window's slot
-            w += WINDOW
+        w = next_window(time.time(), done)
         time.sleep(max(0.0, w + FIRST + POST_AFTER_SECONDS - time.time()))
         run_slot(client, http, store, w)
+        done = w
+
+
+def next_window(now: float, done: int | None) -> int:
+    """The next slot to run: this window's if its slot is still open and not yet run, else the next one."""
+    w = int(now // WINDOW) * WINDOW
+    if now > w + FIRST + POST_AFTER_SECONDS + MAX_WAIT_SECONDS or (done is not None and w <= done):
+        w = max(w, done or w) + WINDOW
+    return w
