@@ -128,3 +128,20 @@ def test_schedule_alternates_pairs_and_never_collides():
     assert fc.next_slot(dt.datetime(2026, 11, 4, 15, 0, 1)) == dt.datetime(2026, 11, 4, 16)
     # Each coin is called every 2 hours with a 1-hour horizon: its last call closed an hour earlier.
     assert set(fc.GROUPS[0]) | set(fc.GROUPS[1]) == set(fc.PAIRS) and not set(fc.GROUPS[0]) & set(fc.GROUPS[1])
+
+
+def test_history_check_replays_exactly_what_live_would_call():
+    from agents import forecaster_backtest as bt
+    n = fc.TRAIN_HOURS + fc.LOOKBACK + 2 + 40
+    series = {p: walk(n, seed=i + 11) for i, p in enumerate(fc.PAIRS)}
+    end = dt.datetime(2026, 11, 4, 12)
+    calls = bt.replay(series, end, test_hours=40)
+    assert calls
+    for c in calls[:: max(1, len(calls) // 6)]:
+        i = c["slot"]
+        assert c["hour"] == end - dt.timedelta(hours=n - 1 - i)
+        assert c["pair"] in fc.GROUPS[c["hour"].hour % 2]
+        live = fc.decide({p: closes[: i + 1] for p, closes in series.items()}, (c["pair"],))[c["pair"]]
+        assert live[0] == c["direction"] and live[1] == pytest.approx(c["confidence"], abs=1e-9)
+    text = bt.summary(calls)
+    assert "settings exactly as live" in text and "Nothing was tuned" in text

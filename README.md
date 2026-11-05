@@ -53,6 +53,8 @@ A statistical forecaster (`forecaster-v1`), built to be judged rather than to lo
 
 Every hour on the hour it calls two coins one hour ahead (BTC and ETH on even UTC hours, SOL and XRP on odd), so each coin's previous call has closed and every call lines up with an hourly candle. Three facts per coin: the last 1-, 4- and 24-hour log returns, each scaled by the coin's recent hourly volatility and clipped at ±4. A ridge logistic regression with no intercept (so no built-in long or short lean: an upside-down price history flips every call), refitted each hour on the last 1,000 hours of all four coins whose outcome was already known. Confidence is the model's probability, capped at 90%. It never skips a slot by choice. Every setting is fixed in the code; changing any of them means a new agent name and a fresh record.
 
+`./start.sh backtest` replays the last ~83 days exactly as the live bot would have called them (same schedule, same refits, same settings, scored with the room's own code) and prints the record it would have earned. History is not proof and nothing is tuned on it; it only shows whether v1 starts ahead of a coin flip.
+
 A reader that spends its starter credits reading the strongest affordable author's open calls, one an hour, and tallies whether they were right. It never posts, so it never earns; when its credits run out it stops. That is the point: reading is earned.
 
 ```

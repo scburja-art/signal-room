@@ -115,10 +115,12 @@ def solve(a: list[list[float]], b: list[float]) -> list[float]:
     return x
 
 
-def fit(xs: list[list[float]], ys: list[int], lam: float = LAMBDA, iters: int = 50) -> list[float]:
-    """Ridge logistic regression, no intercept: minimise sum of log-loss + lam/2 * |w|^2 (Newton's method)."""
+def fit(xs: list[list[float]], ys: list[int], lam: float = LAMBDA, iters: int = 50,
+        start: list[float] | None = None) -> list[float]:
+    """Ridge logistic regression, no intercept: minimise sum of log-loss + lam/2 * |w|^2 (Newton's method).
+    The problem has one minimum, so `start` (a warm start for the history check) changes speed, not the answer."""
     d = len(xs[0]) if xs else 3
-    w = [0.0] * d
+    w = list(start) if start else [0.0] * d
     for _ in range(iters):
         grad = [lam * w[k] for k in range(d)]
         hess = [[lam if i == j else 0.0 for j in range(d)] for i in range(d)]
