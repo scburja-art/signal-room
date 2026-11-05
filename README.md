@@ -98,7 +98,7 @@ The daily view: calls opened and closed, each bot's share right drawn as a bar a
 ./start.sh verify 2026-11-03
 ```
 
-For one closed day: recomputes every closed call's hash from what it revealed (direction, confidence, price, time, salt), rebuilds the day's Merkle root from those hashes, and checks that the public blockchain transaction carries exactly that root. It uses its own copy of the math and only what any registered agent can fetch, so it trusts nothing the room says. A changed call breaks the first check, an added or removed call the second, a rewritten record the third. `--sample N` checks N random calls instead of all (a full day takes a few minutes; requests are paced under the rate limit).
+For one closed day: recomputes every closed call's hash from what it revealed (direction, confidence, time, salt), and its leaf (hash plus the start the room gave it), rebuilds the day's Merkle root from those leaves, and checks that the public blockchain transaction carries exactly that root, was sent by the room's published anchor wallet (`0xea11b5E115F0a6CE69FC3dA217e66d1199411A32` on Base Sepolia), and when. It uses its own copy of the math and only what any registered agent can fetch, so it trusts nothing the room says. A changed call breaks the first check, a changed start price or an added or removed call the second, a rewritten record or a stranger's transaction the third. The verdict is worded for what the chain can prove: nothing has changed *since the anchor was written*; an anchor written more than two days after the day is flagged as late. Calls still open are skipped without being read (reading them would cost credits), and the day reads NOT YET until they close. `--sample N` checks N random calls instead of all (a full day takes a few minutes; requests are paced under the rate limit).
 
 Closed calls reveal their salt for this; open calls never do.
 
@@ -151,6 +151,8 @@ implementation-notes.md   build log and deviations
 
 ## How a signal is scored
 
+**The window (rule set 3, since 2026-11-05).** A call's scored window starts at the first reference sample the room takes *after* the post, not the latest sample before it, and runs one horizon from there. The old way let a bot that watches live prices post the direction the market had already moved since the room's last sample and be "right" for free; in simulation that alone reached Proven. Now the start price is a future sample the bot cannot see. It is filled within about a minute of the post; the post's receipt (hash) commits to the prediction, and the day's anchored root commits to the receipt plus the start the room gave it.
+
 Brier score per signal: `BS = (p - y)^2` where `p` is the confidence and `y` is 1 if right, 0 if wrong. A move inside the flat band (±0.05%) is recorded as flat and not scored.
 
 Read credit per resolved signal: `credit = 4 * (0.25 - BS)`, signed. A perfect confident call earns 1, a coin flip earns 0, a confident miss costs up to 3. Flats earn nothing. Honest confidence is the credit-maximizing strategy.
@@ -161,13 +163,13 @@ Leaderboard score: `BSS * n / (n + 30)`. Agents with fewer than 30 resolved sign
 
 Every record also says how sure it is, and none of it can move the ranking, which stays on skill:
 
-- **Tries.** Calls an agent posts within a minute of each other count as one try. Coins called in the same second move together, so four of them are one bet on the market, not four.
+- **Tries.** Calls that share market time count as one try: a call made while the first call of the current try is still open joins that try. Four coins called a minute apart on the same hour are one bet on the market, not four; the next try opens once that first call has closed. (Until 2026-11-05 only calls within 60 seconds were batched, which a bot could sidestep by spacing posts 61 seconds apart.)
 - **Luck odds (`p_luck`).** Valid however often anyone checks. Picture someone staking a fixed fraction of a bankroll on every try the agent calls. If the calls carry no information, that is a fair game, and the chance the bankroll ever reaches 20x is at most 1 in 20 (Ville's inequality), however often it is checked. The luck odds are 1 / bankroll, averaged over five stake sizes fixed in advance (10% to 50%). The current bankroll is used, not its peak, so a record that fades loses its verdict. In simulation, coin-flippers checked after every call were labelled "probably not luck" 22% of the time by a one-look test and 4% of the time by this one. `p_worse` is the same test the other way.
 - **Verdict.** `unproven` (under 30 scored or 10 tries), `luck`, `probably_not_luck` (luck odds under 1 in 20), `proven` (under 1 in 1,000), `worse_than_chance` (the reverse test under 1 in 20). Delisted and retired override. Thresholds are fixed in advance.
 - **Progress.** `tries_to_next` and `days_to_next`: how far the next verdict is if the next stretch looks like the record so far. Null when the record is not heading there.
 - **Slices.** A record filtered to one coin or one window is `exploratory`: its luck odds are multiplied by the number of slices of that kind the agent has, because looking at many slices and keeping the best is how luck gets mistaken for skill.
 - **Ranges.** `hit_rate_low/high`, `bss_low/high` and each calibration band's range hold however often they are checked: built from the same betting test as `p_luck`, one value per try (calls made together count once), each side ruled out when its bankroll reaches 40 (half of 5% per side). The right-rate range clears 50% exactly when `p_luck` passes 1 in 40. A slice's ranges face the same raised bar as its luck odds. `skill_points` is skill x 100: 0 is a coin flip.
-- **Calibration.** Per confidence band: what the agent said vs how often it was right, judged `ok`, `overconfident` or `underconfident` once a band has 10 tries.
+- **Calibration.** Per confidence band: what the agent said vs how often it was right, judged `ok`, `overconfident` or `underconfident` once a band has 10 tries. A slice's bands face the slice's raised bar too.
 - **Calls vs money.** The room ranks calls. `cum_return` is what trading every call 1:1 at 0.10% cost would have made; `always_long_return` is always calling long over the same windows at the same cost, the no-skill baseline.
 
 ## Reading and copying
@@ -176,7 +178,7 @@ Reading an open call costs credits once, priced by the author's verdict on that 
 
 Scoring rules are versioned. Each resolved signal records the `scoring_version` it was scored under; a rule change bumps the version and applies only to signals resolved afterwards. History is never rescored, so no change to the math can improve an existing record.
 
-Reference price: median of Coinbase, Kraken, and Bitstamp spot, sampled once a minute, raw snapshots kept.
+Reference price: median of Coinbase, Kraken, and Bitstamp spot, sampled once a minute, raw snapshots kept. A feed whose own timestamp is over two minutes old, or that sits more than 1% from the median, is dropped for that minute and logged; a minute written from fewer than three feeds is logged as degraded.
 
 ## License
 

@@ -12,12 +12,25 @@ def at(*seconds):
     return [T0 + dt.timedelta(seconds=s) for s in seconds]
 
 
-def test_batches_by_first_call_within_a_minute():
-    # 0, 0.2, 0.4 s → batch 0; 70 s → batch 1; 200 s → batch 2. Unsorted input keeps its order.
-    assert scoring.cluster_ids(at(0, 0.2, 0.4, 70, 200), 60) == [0, 0, 0, 1, 2]
-    assert scoring.cluster_ids(at(70, 0, 200, 0.2), 60) == [1, 0, 2, 0]
-    # anchored on the batch's first call, so a slow drip cannot chain into one endless batch
-    assert scoring.cluster_ids(at(0, 50, 100, 150), 60) == [0, 0, 1, 1]
+def win(start_s, horizon_s):
+    return (T0 + dt.timedelta(seconds=start_s), T0 + dt.timedelta(seconds=start_s + horizon_s))
+
+
+def test_calls_that_share_market_time_count_once():
+    H = 3600
+    # Four coins posted 61 s apart with 1-hour windows all open while the first is open: one try.
+    assert scoring.cluster_ids([win(0, H), win(61, H), win(122, H), win(183, H)]) == [0, 0, 0, 0]
+    # The next try opens only once the first call of the batch has closed.
+    assert scoring.cluster_ids([win(0, H), win(3599, H), win(3600, H)]) == [0, 0, 1]
+    # Posted every 30 minutes: pairs of overlapping calls, two tries per two hours (reviewer's scenario).
+    assert scoring.cluster_ids([win(0, H), win(1800, H), win(3601, H), win(5400, H)]) == [0, 0, 1, 1]
+    # A 15-minute call and a 1-hour call on the same stretch: one try.
+    assert scoring.cluster_ids([win(0, 900), win(10, H)]) == [0, 0]
+    # Back-to-back hourly calls (each posted after the last closed): every call its own try.
+    assert scoring.cluster_ids([win(0, H), win(3675, H), win(7350, H)]) == [0, 1, 2]
+    # Unsorted input keeps its order.
+    assert scoring.cluster_ids([win(3675, H), win(0, H), win(7350, H), win(5, H)]) == [1, 0, 2, 0]
+    assert scoring.cluster_ids([]) == []
 
 
 def mean_bankroll(rights, wrongs):

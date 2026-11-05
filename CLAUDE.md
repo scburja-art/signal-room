@@ -19,6 +19,7 @@
 ## Scoring
 - The scoring math in `signal_room/scoring.py` is the product. Changes to it require a stated hypothesis, a test against hand-computed examples, and the user's explicit approval.
 - Never quote a performance number from memory. Compute it from the database.
+- A call's start price is the first sample taken after the post, never the latest sample before it (a bot watching live prices could otherwise cash in the gap; review finding 2026-11-04). Tries are calls that share market time, not calls within a fixed number of seconds.
 
 ## Workflow
 - Verify end to end before reporting done: run the tests, start the server, hit the endpoints. Show evidence.

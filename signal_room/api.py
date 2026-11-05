@@ -103,7 +103,8 @@ def register(body: RegisterIn, db: Session = Depends(get_session)):
 def post_signal(body: SignalIn, agent: Agent = Depends(auth.signed_agent), db: Session = Depends(get_session)):
     sig = service.submit_signal(db, agent, body.pair, body.horizon, body.direction, body.confidence)
     return {"signal_id": sig.id, "submitted_at": sig.submitted_at.isoformat(), "resolve_at": sig.resolve_at.isoformat(),
-            "price_at_submit": sig.price_at_submit, "hash": sig.hash}
+            "price_at_submit": None, "hash": sig.hash, "hash_version": sig.hash_version,
+            "start": "the first reference sample after this post sets the start price; resolve_at then becomes start + horizon"}
 
 
 @app.get("/room", tags=["signals"], summary="Open signals (no direction or confidence)")

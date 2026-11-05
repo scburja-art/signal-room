@@ -61,7 +61,12 @@ class Signal(Base):
     hash: Mapped[str] = mapped_column(String(64), index=True)
     submitted_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow, index=True)
     resolve_at: Mapped[dt.datetime] = mapped_column(DateTime, index=True)
-    price_at_submit: Mapped[float] = mapped_column(Float)
+    # The scored window starts at the first reference sample taken AFTER the post (rule set 3), so the
+    # start price is unknown at post time and filled on the next tick. Calls from rule sets 1-2 carried
+    # the latest sample before the post (start_at NULL, price set at post).
+    price_at_submit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    start_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    hash_version: Mapped[int | None] = mapped_column(Integer, nullable=True)   # 3: hash carries no price
     # Filled on resolution
     resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     price_at_resolve: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -134,6 +139,7 @@ class DailyLog(Base):
     merkle_root: Mapped[str] = mapped_column(String(64))
     signal_count: Mapped[int] = mapped_column(Integer)
     anchored_tx: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    pending_tx: Mapped[str | None] = mapped_column(String(80), nullable=True)   # sent, not yet mined
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -191,6 +197,13 @@ def _migrate(eng) -> None:
         price_cols = {c["name"] for c in insp.get_columns("reference_prices")}
         if "source" not in price_cols:
             conn.execute(text("ALTER TABLE reference_prices ADD COLUMN source VARCHAR(16) DEFAULT 'live'"))
+        if "start_at" not in sig_cols:
+            conn.execute(text("ALTER TABLE signals ADD COLUMN start_at DATETIME"))
+            conn.execute(text("ALTER TABLE signals ADD COLUMN hash_version INTEGER"))
+            conn.execute(text("UPDATE signals SET hash_version = 2"))
+        log_cols = {c["name"] for c in insp.get_columns("daily_logs")}
+        if "pending_tx" not in log_cols:
+            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN pending_tx VARCHAR(80)"))
         if "scoring_version" not in sig_cols:
             conn.execute(text("ALTER TABLE signals ADD COLUMN scoring_version INTEGER"))
             # Rows resolved before this column existed: version 1 if scored under the old rules

@@ -93,6 +93,17 @@ def test_schedule_alternates_and_never_collides():
     assert f2.FIRST + f2.WINDOW < 2 * f2.WINDOW + f2.FIRST
 
 
+def test_history_check_scores_the_rooms_window_not_the_models():
+    from agents import forecaster_backtest as bt
+    series = big_series()
+    last_w = latest_window(series)
+    calls = bt.replay_v2(series, last_w, last_w)
+    for c in calls:
+        px = series[c["pair"]]
+        from signal_room import scoring
+        assert c["result"] == scoring.outcome(c["direction"], px[c["slot"] + 120], px[c["slot"] + 1020])[0]
+
+
 def test_history_check_matches_live():
     from agents import forecaster_backtest as bt
     series = big_series()

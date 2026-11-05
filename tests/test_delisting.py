@@ -5,7 +5,7 @@ import pytest
 
 from signal_room import config, service
 from signal_room.db import Agent, AuditEvent, Signal
-from tests.conftest import set_price
+from tests.conftest import set_price, start
 from tests.test_api import Agent as ApiAgent
 
 
@@ -20,12 +20,12 @@ def post_and_resolve(client, factory, agent, n, right, confidence=0.8, pair="BTC
         set_price(factory, pair, 100.0)
         r = agent.post("/signals", {"pair": pair, "horizon": "15m", "direction": "long", "confidence": confidence})
         assert r.status_code == 201, r.text
-        s = factory()
-        sig = s.query(Signal).filter_by(id=r.json()["signal_id"]).first()
+        sig = start(factory, r.json()["signal_id"], 100.0)
         assert sig.price_at_submit == 100.0
         set_price(factory, pair, 101.0 if right else 99.0, when=sig.resolve_at)
+        s = factory()
         service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=1))
-        s.refresh(sig)
+        sig = s.query(Signal).filter_by(id=sig.id).first()
         assert sig.result == ("right" if right else "wrong"), sig.result
         s.close()
 

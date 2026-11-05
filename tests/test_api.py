@@ -11,7 +11,7 @@ from signal_room import service
 from signal_room.db import utcnow
 from signal_room.sealing import merkle_root
 from tests.api_helpers import Agent  # noqa: F401  (re-exported for other tests)
-from tests.conftest import set_price
+from tests.conftest import set_price, start
 
 
 def test_registration_requires_valid_signature(client):
@@ -80,10 +80,9 @@ def test_full_flow(client, session_factory):
     assert seller.get("/me").json()["credits"] == 10.0
 
     # resolve: price went up 1% at the horizon → right, BS 0.04, credit 0.84
-    from signal_room.db import Signal
-    s = session_factory()
-    sig = s.query(Signal).filter_by(id=sid).first()
+    sig = start(session_factory, sid, 2000.0)
     set_price(session_factory, "ETH", 2020.0, when=sig.resolve_at)
+    s = session_factory()
     resolved = service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=5))
     assert resolved == 1
     s.close()
@@ -103,7 +102,9 @@ def test_full_flow(client, session_factory):
     # daily log carries the hash and a matching merkle root
     log = reader.get(f"/log/{utcnow().date().isoformat()}").json()
     assert [x["hash"] for x in log["signals"]] == [done["hash"]]
-    assert log["merkle_root"] == merkle_root([done["hash"]])
+    from signal_room.sealing import leaf_hash
+    assert log["signals"][0]["leaf"] == leaf_hash(done["hash"], done["start_at"], done["price_at_submit"])
+    assert log["merkle_root"] == merkle_root([log["signals"][0]["leaf"]])
 
 
 def test_insufficient_credits(client, session_factory):
@@ -135,9 +136,9 @@ def test_leaderboard_ranks_after_30(client, session_factory):
         set_price(session_factory, "BTC", 100.0)
         r = a.post("/signals", {"pair": "BTC", "horizon": "15m", "direction": "long", "confidence": 0.7})
         assert r.status_code == 201, r.text
-        s = session_factory()
-        sig = s.query(Signal).filter_by(id=r.json()["signal_id"]).first()
+        sig = start(session_factory, r.json()["signal_id"], 100.0)
         set_price(session_factory, "BTC", 101.0 if i % 4 else 99.0, when=sig.resolve_at)  # 3 right : 1 wrong
+        s = session_factory()
         service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=1))
         s.close()
     lb = a.get("/leaderboard", params={"horizon": "15m"}).json()["agents"]

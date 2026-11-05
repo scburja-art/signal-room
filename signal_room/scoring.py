@@ -45,7 +45,7 @@ COIN_FLIP_BS = 0.25
 #   2  2026-10-28: flats unscored; credits signed
 # Record-level changes, no per-signal change (version stays 2):
 #      2026-10-31: calls posted together count as one try; flats scored under 1 left out of aggregates
-SCORING_VERSION = 2
+SCORING_VERSION = 3   # 3 (2026-11-05): start price is the first sample after the post
 
 
 def outcome(direction: str, price_start: float, price_end: float) -> tuple[str, float | None]:
@@ -87,15 +87,19 @@ def shrink(bss: float, n: int) -> float:
     return bss * n / (n + config.SHRINK_N)
 
 
-def cluster_ids(times: list, window_seconds: float) -> list[int]:
-    """Batch id per call: a call within window_seconds of its batch's first call joins that batch.
-    Returned in the input's order; the input need not be sorted."""
-    order = sorted(range(len(times)), key=lambda i: times[i])
-    ids = [0] * len(times)
-    batch, start = -1, None
+def cluster_ids(windows: list[tuple]) -> list[int]:
+    """Batch id per call from its scored window (start, end): a call whose window opens while its
+    batch's first call is still open joins that batch, so calls that share market time count as one
+    try. Returned in the input's order; the input need not be sorted. Residual: a late member of a
+    batch may still overlap the next batch's first call; the next batch opens only once the first
+    call of this one has closed."""
+    order = sorted(range(len(windows)), key=lambda i: windows[i])
+    ids = [0] * len(windows)
+    batch, anchor_end = -1, None
     for i in order:
-        if start is None or (times[i] - start).total_seconds() > window_seconds:
-            batch, start = batch + 1, times[i]
+        start, end = windows[i]
+        if anchor_end is None or start >= anchor_end:
+            batch, anchor_end = batch + 1, end
         ids[i] = batch
     return ids
 
@@ -271,7 +275,7 @@ def confidence_from(brier_score: float, result: str) -> float:
     return 1.0 - root if result == "right" else root
 
 
-def calibration(confs: list[float], hits: list[int], clusters: list | None) -> list[dict]:
+def calibration(confs: list[float], hits: list[int], clusters: list | None, alpha: float = 0.05) -> list[dict]:
     """For each confidence band: how sure the agent said it was vs how often it was right, with a
     range on the actual rate that holds however often it is checked (batched calls count once). An agent whose stated confidence sits
     outside that range is overconfident or underconfident in that band."""
@@ -285,7 +289,7 @@ def calibration(confs: list[float], hits: list[int], clusters: list | None) -> l
         tries = len(set(cl)) if cl is not None else len(idx)
         stated = sum(confs[i] for i in idx) / len(idx)
         actual = sum(h) / len(h)
-        low, high = confidence_range([float(x) for x in h], cl)
+        low, high = confidence_range([float(x) for x in h], cl, alpha)
         if tries < CALIBRATION_MIN:
             judged = "too few"
         elif stated > high:
@@ -359,7 +363,7 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         next_verdict=nxt, tries_to_next=tries_to_reach(batches, LADDER[nxt] / slices) if nxt else None,
         exploratory=slices > 1,
         always_long_return=round(compounded(long_returns or []), 6),
-        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl),
+        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl, 0.05 / slices),
     )
 
 

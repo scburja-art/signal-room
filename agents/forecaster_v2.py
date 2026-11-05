@@ -16,6 +16,9 @@ Model: logistic regression with no intercept, ridge penalty LAMBDA, refitted eve
   TRAIN_WINDOWS windows of all four coins whose outcome was already known (every window up to 15 minutes
   before this one). No intercept means no built-in lean: an upside-down price history flips every call.
 Call: direction = the side the model puts above 50%; confidence = that probability, capped at CAP.
+What the room scores: its window starts at the first reference sample after the post, which lands in the
+  minute after W+1m, and runs one horizon from there (about W+2m to W+17m). The fact ends at W+1m, so the
+  bot's information is at least a minute older than the window it is judged on. No lookahead is possible.
 
 Prices: Coinbase's public 1-minute candles (no keys). No model calls, no randomness.
 """
@@ -46,6 +49,7 @@ CLIP = 4.0
 FLAT = math.log(1.0005)
 CAP = 0.90
 POST_AFTER_SECONDS = 8   # past W+1m, so the first minute's candle is out at Coinbase
+ROOM_START = 120         # the room's start sample lands in the minute after the post: W+2m (used by the history check)
 MAX_WAIT_SECONDS = 50    # if it is not out by then, the slot is missed (never chosen)
 HISTORY = TRAIN_WINDOWS * WINDOW + WINDOW + FIRST + VOL_MINUTES * 60 + 120   # seconds of closes kept
 
@@ -185,7 +189,7 @@ def run_slot(client: SignalRoomClient, http: httpx.Client, store: Closes, w: int
     for pair, (direction, confidence) in calls.items():
         try:
             out = client.post_signal(pair, HORIZON, direction, round(confidence, 4))
-            log.info("%s %s @%.2f -> %s", pair, direction, out["price_at_submit"], out["signal_id"])
+            log.info("%s %s posted -> %s", pair, direction, out["signal_id"])
         except SignalRoomError as e:
             log.warning("%s: %s", pair, e)
 
@@ -206,7 +210,10 @@ def main(base_url: str, state_path: str) -> None:
     while True:
         w = next_window(time.time(), done)
         time.sleep(max(0.0, w + FIRST + POST_AFTER_SECONDS - time.time()))
-        run_slot(client, http, store, w)
+        try:
+            run_slot(client, http, store, w)
+        except Exception as e:   # server restart, network blip: skip the slot, keep the schedule
+            log.warning("slot %s failed (%s)", time.strftime("%H:%M", time.gmtime(w)), type(e).__name__)
         done = w
 
 

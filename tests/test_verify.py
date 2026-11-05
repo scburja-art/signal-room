@@ -8,6 +8,7 @@ from signal_room import config, service
 from signal_room.db import DailyLog, Signal, utcnow
 from signal_room.sealing import seal, signal_hash
 from tests.api_helpers import Agent
+from tests.conftest import set_price
 from tests.test_delisting import post_and_resolve
 
 
@@ -39,7 +40,7 @@ def anchored_day(client, factory, n=3):
     root = log.merkle_root
     s.close()
     chain = lambda tx: {"found": True, "success": True, "payload": verify.expected_payload(day.isoformat(), root),
-                        "time": dt.datetime.now(dt.timezone.utc), "sender": "0xabc"}
+                        "time": dt.datetime.now(dt.timezone.utc), "sender": verify.ANCHOR_WALLET}
     return day.isoformat(), chain, ApiClient(Agent(client, "outsider"))
 
 
@@ -54,12 +55,25 @@ def test_a_changed_call_is_caught(client, session_factory):
     day, chain, outsider = anchored_day(client, session_factory)
     s = session_factory()
     sig = s.query(Signal).first()
-    sig.price_at_submit += 1.0          # history rewritten after the fact
+    sig.price_at_submit += 1.0          # the start price rewritten after the fact
+    s.commit()
+    s.close()
+    r = verify.verify_day(outsider, day, chain=chain, pause=0)
+    # The start price is not in the receipt (it is set after the post), so link 1 still matches;
+    # the day's root commits to it, so link 2 breaks.
+    assert not r["ok"] and not r["root_matches_anchor"]
+    assert "does NOT match the anchored one" in verify.report(r)
+    # The call itself, re-sealed with a different direction: link 1 breaks.
+    day, chain, outsider = anchored_day(client, session_factory)
+    s = session_factory()
+    sig = s.query(Signal).order_by(Signal.submitted_at.desc()).first()
+    from signal_room.sealing import seal, unseal
+    body = unseal(sig.agent_id, sig.body_cipher)
+    sig.body_cipher = seal(sig.agent_id, {**body, "direction": "short"})
     s.commit()
     s.close()
     r = verify.verify_day(outsider, day, chain=chain, pause=0)
     assert not r["ok"] and len(r["mismatched"]) == 1
-    assert "do NOT match their published fingerprint" in verify.report(r)
 
 
 def test_an_added_call_is_caught(client, session_factory):
@@ -117,7 +131,7 @@ def test_calls_from_before_salts_still_verify(client, session_factory):
     root = log.merkle_root
     s.close()
     chain = lambda tx: {"found": True, "success": True, "payload": verify.expected_payload(when.date().isoformat(), root),
-                        "time": dt.datetime.now(dt.timezone.utc)}
+                        "time": dt.datetime.now(dt.timezone.utc), "sender": verify.ANCHOR_WALLET}
     r = verify.verify_day(ApiClient(Agent(client, "outsider")), when.date().isoformat(), chain=chain, pause=0)
     assert r["ok"] and r["matched"] == 1
 
@@ -148,3 +162,40 @@ def test_chain_lookup_reads_a_real_shaped_reply(monkeypatch):
     c = verify.chain_lookup("0x3520d47162353a54d44c5306de3fbe40934a42000c6ba8d785aa2809ee1a2c35")
     assert c["found"] and c["success"] and c["payload"] == payload
     assert c["time"] == dt.datetime(2026, 11, 4, 14, 50, 23, tzinfo=dt.timezone.utc)
+
+
+def test_open_calls_are_skipped_without_spending(client, session_factory):
+    from tests.conftest import start
+    author = Agent(client, "author")
+    post_and_resolve(client, session_factory, author, 3, right=True, confidence=0.7)
+    set_price(session_factory, "ETH", 10.0)
+    r = author.post("/signals", {"pair": "ETH", "horizon": "24h", "direction": "long", "confidence": 0.6})
+    assert r.status_code == 201
+    start(session_factory, r.json()["signal_id"], 10.0)   # open, with its start price: the day can be anchored
+    day = utcnow().date()
+    s = session_factory()
+    log = service.build_daily_log(s, day)
+    log.anchored_tx = "0x" + "ab" * 32
+    s.commit()
+    root = log.merkle_root
+    s.close()
+    day = day.isoformat()
+    chain = lambda tx: {"found": True, "success": True, "payload": verify.expected_payload(day, root),
+                        "time": dt.datetime.now(dt.timezone.utc), "sender": verify.ANCHOR_WALLET}
+    outsider = ApiClient(Agent(client, "outsider"))
+    r = verify.verify_day(outsider, day, chain=chain, pause=0)
+    assert r["still_open"] == 1 and r["checked"] == 3 and not r["ok"]
+    assert "NOT YET" in verify.report(r)
+    after = outsider.agent.get("/me").json()["credits"]
+    assert after == 10.0                      # nothing was bought
+
+
+def test_wrong_sender_and_late_anchor_are_flagged(client, session_factory):
+    day, chain, outsider = anchored_day(client, session_factory)
+    good = chain(None)
+    stranger = lambda tx: {**good, "sender": "0x" + "11" * 20}
+    r = verify.verify_day(outsider, day, chain=stranger, pause=0)
+    assert not r["ok"] and not r["sender_matches"] and "not the room's published anchor wallet" in verify.report(r)
+    late = lambda tx: {**good, "time": good["time"] + dt.timedelta(days=9)}
+    r = verify.verify_day(outsider, day, chain=late, pause=0)
+    assert r["ok"] and r["anchor_late_hours"] and "days after the day closed" in verify.report(r)

@@ -1,8 +1,10 @@
 """Reference prices: median of Coinbase, Kraken, and Bitstamp spot, sampled once a minute.
 
 Every raw feed value is stored with the feed's own timestamp so any score can be replayed.
-A feed that is down is skipped; the median is taken over whatever answered. If fewer than
-two feeds answer, no reference price is written for that minute.
+A feed that is down, stale (its own timestamp older than STALE_FEED_SECONDS) or far from the
+others (more than OUTLIER_FRACTION from the median of the rest) is dropped for that minute and
+logged; the median is taken over the feeds that remain. A minute written from fewer than three
+feeds is logged as degraded. If fewer than two feeds remain, no reference price is written.
 """
 from __future__ import annotations
 
@@ -17,6 +19,8 @@ from . import config
 from .db import AuditEvent, PriceSnapshot, ReferencePrice, utcnow
 
 TIMEOUT = 8.0
+STALE_FEED_SECONDS = 120   # a feed whose own timestamp is older than this is not a live price
+OUTLIER_FRACTION = 0.01    # a feed more than 1% from the median of the others is wrong, not the market
 
 KRAKEN_PAIRS = {"BTC": "XBTUSD", "ETH": "ETHUSD", "SOL": "SOLUSD", "XRP": "XRPUSD"}
 
@@ -50,6 +54,19 @@ def fetch_bitstamp(client: httpx.Client, pair: str) -> tuple[float, dt.datetime 
 FEEDS = {"coinbase": fetch_coinbase, "kraken": fetch_kraken, "bitstamp": fetch_bitstamp}
 
 
+def good_feeds(got: dict[str, float]) -> dict[str, float]:
+    """Drop any feed more than OUTLIER_FRACTION from the median of all feeds (with three feeds the
+    median is the middle one, so one wild feed cannot drag it). With only two feeds that disagree by
+    that much neither can be trusted, so both are dropped (no price this minute)."""
+    if len(got) < 2:
+        return dict(got)
+    if len(got) == 2:
+        a, b = got.values()
+        return dict(got) if abs(a - b) / min(a, b) <= OUTLIER_FRACTION else {}
+    ref = statistics.median(got.values())
+    return {f: p for f, p in got.items() if abs(p - ref) / ref <= OUTLIER_FRACTION}
+
+
 def sample_all(db: Session, client: httpx.Client | None = None, now: dt.datetime | None = None) -> dict[str, float]:
     """Fetch every feed for every pair, store raw snapshots, write the medians. Returns {pair: median}."""
     now = now or utcnow().replace(second=0, microsecond=0)
@@ -60,7 +77,7 @@ def sample_all(db: Session, client: httpx.Client | None = None, now: dt.datetime
         for pair in config.PAIRS:
             if db.query(ReferencePrice.id).filter_by(pair=pair, sampled_at=now).first():
                 continue  # already sampled this minute
-            prices = []
+            got: dict[str, float] = {}
             for feed, fn in FEEDS.items():
                 try:
                     price, feed_time = fn(client, pair)
@@ -68,11 +85,19 @@ def sample_all(db: Session, client: httpx.Client | None = None, now: dt.datetime
                     db.add(AuditEvent(event="feed_error", detail=f"{feed} {pair}: {type(e).__name__}"))
                     continue
                 db.add(PriceSnapshot(pair=pair, feed=feed, price=price, feed_time=feed_time, sampled_at=now))
-                prices.append(price)
+                if feed_time is not None and (utcnow() - feed_time).total_seconds() > STALE_FEED_SECONDS:
+                    db.add(AuditEvent(event="feed_stale", detail=f"{feed} {pair}: {feed_time.isoformat()}"))
+                    continue
+                got[feed] = price
+            prices = good_feeds(got)
+            for feed in set(got) - set(prices):
+                db.add(AuditEvent(event="feed_outlier", detail=f"{feed} {pair}: {got[feed]} vs {sorted(got.values())}"))
             if len(prices) >= 2:
-                med = statistics.median(prices)
+                med = statistics.median(prices.values())
                 db.add(ReferencePrice(pair=pair, price=med, feeds_used=len(prices), sampled_at=now))
                 medians[pair] = med
+                if len(prices) < len(FEEDS):
+                    db.add(AuditEvent(event="price_degraded", detail=f"{pair} {now.isoformat()} feeds={sorted(prices)}"))
             else:
                 db.add(AuditEvent(event="price_gap", detail=f"{pair} {now.isoformat()} feeds={len(prices)}"))
         db.commit()

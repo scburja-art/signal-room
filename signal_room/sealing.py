@@ -26,19 +26,29 @@ def new_salt() -> str:
 
 
 def signal_hash(agent_id: str, pair: str, horizon: str, direction: str, confidence: float,
-                submitted_at_iso: str, price_at_submit: float, salt: str) -> str:
-    """Commitment to the prediction plus the server stamp.
+                submitted_at_iso: str, price_at_submit: float | None, salt: str) -> str:
+    """Commitment to the prediction plus the server stamp. Since rule set 3 the start price is the
+    first sample taken after the post, unknown at post time, so it is not part of the hash (None).
 
     The salt is random per signal and stays inside the encrypted body until the signal resolves.
     Without it, everything else in the hash is public or guessable (the listing shows pair,
     horizon, author and time; the reference price is public), so a reader could brute-force
     direction and confidence from the hash alone. With a 128-bit salt that is infeasible.
     """
-    return sha256_hex(canonical({
+    fields = {
         "agent": agent_id, "pair": pair, "horizon": horizon, "direction": direction,
-        "confidence": round(confidence, 4), "submitted_at": submitted_at_iso,
-        "price_at_submit": price_at_submit, "salt": salt,
-    }))
+        "confidence": round(confidence, 4), "submitted_at": submitted_at_iso, "salt": salt,
+    }
+    if price_at_submit is not None:
+        fields["price_at_submit"] = price_at_submit
+    return sha256_hex(canonical(fields))
+
+
+def leaf_hash(signal_hash_hex: str, start_at_iso: str, price_at_submit: float) -> str:
+    """What the daily root commits to for a rule-set-3 call: the call's receipt hash plus the start
+    the room gave it (first sample after the post). Set once the start is known; the receipt alone
+    stands in until then, and a day is only anchored once every call in it has its start."""
+    return sha256_hex(canonical({"hash": signal_hash_hex, "start_at": start_at_iso, "price_at_submit": price_at_submit}))
 
 
 def _agent_fernet(agent_id: str) -> Fernet:

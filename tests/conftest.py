@@ -56,3 +56,41 @@ def set_price(factory, pair: str, price: float, when: dt.datetime | None = None)
     s.add(ReferencePrice(pair=pair, price=price, feeds_used=3, sampled_at=when or utcnow()))
     s.commit()
     s.close()
+
+
+def start(factory, signal_id: str, price: float, when: dt.datetime | None = None):
+    """Give a freshly posted call its start price: a sample taken after the post (rule set 3), then
+    the fill. Returns the signal with its final resolve_at."""
+    from signal_room import service
+    from signal_room.db import Signal
+    s = factory()
+    sig = s.query(Signal).filter_by(id=signal_id).first()
+    at = when or sig.submitted_at + dt.timedelta(seconds=1)
+    s.add(ReferencePrice(pair=sig.pair, price=price, feeds_used=3, sampled_at=at))
+    s.commit()
+    service.fill_start_prices(s)
+    s.refresh(sig)
+    s.close()
+    return sig
+
+
+def spread(factory, agent_id: str | None = None, minutes: int = 15, end: dt.datetime | None = None):
+    """Test helpers post in a burst; real calls are minutes apart. Space the calls back in time so
+    each window closes before the next opens and every call is its own try. The last call ends at
+    `end` (default: now)."""
+    from signal_room import config
+    from signal_room.db import Signal
+    s = factory()
+    q = s.query(Signal)
+    if agent_id:
+        q = q.filter_by(agent_id=agent_id)
+    sigs = q.order_by(Signal.submitted_at).all()
+    end = end or utcnow()
+    for i, sig in enumerate(sigs):
+        sig.submitted_at = end - dt.timedelta(minutes=minutes * (len(sigs) - i)) - dt.timedelta(seconds=1)
+        sig.start_at = sig.submitted_at + dt.timedelta(seconds=1)
+        sig.resolve_at = sig.start_at + dt.timedelta(seconds=config.HORIZONS[sig.horizon])
+        if sig.resolved_at is not None:
+            sig.resolved_at = sig.resolve_at
+    s.commit()
+    s.close()

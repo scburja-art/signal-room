@@ -7,6 +7,7 @@ from signal_room import config, report
 from signal_room.db import Signal
 from tests.test_api import Agent as ApiAgent
 from tests.test_delisting import post_and_resolve
+from tests.conftest import spread
 
 
 @pytest.fixture(autouse=True)
@@ -27,12 +28,13 @@ def test_report_counts_window_and_verdict_change(client, session_factory):
 
     # Spread the calls 15 minutes apart so each is its own try. The last 10 close inside the report window.
     now = dt.datetime(2026, 11, 4, 12, 0)
+    spread(session_factory, end=now - dt.timedelta(hours=30))
     db = session_factory()
     sigs = db.query(Signal).order_by(Signal.submitted_at).all()
-    for i, sig in enumerate(sigs):
-        sig.submitted_at = now - dt.timedelta(hours=48) + dt.timedelta(minutes=15 * i) if i < 23 \
-            else now - dt.timedelta(hours=20) + dt.timedelta(minutes=15 * i)
-        sig.resolved_at = sig.submitted_at + dt.timedelta(minutes=15)
+    for i, sig in enumerate(sigs[23:]):
+        sig.submitted_at = now - dt.timedelta(hours=20) + dt.timedelta(minutes=15 * i)
+        sig.start_at = sig.submitted_at + dt.timedelta(seconds=1)
+        sig.resolve_at = sig.resolved_at = sig.start_at + dt.timedelta(minutes=15)
     db.commit()
 
     text = report.report(session_factory(), now=now)

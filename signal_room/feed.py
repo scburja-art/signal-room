@@ -38,7 +38,7 @@ LINE = re.compile(r"^\d{4}-\d\d-\d\d (\d\d):(\d\d):\d\d,\d+ (\w+) ([\w.]+): (.*)
 # Lines the feed never shows: retries, the agents' own copies of what the server reports, routine requests.
 HIDE = re.compile(
     r"still pending|already pending|will retry|HTTP/1\.1\" [234]\d\d |'resolved': \d+\}|^==> |^\s*$"
-    r"|^(BTC|ETH|SOL|XRP) (long|short) @|^bet \S+ \[.*\] -> |^read \S+ \S+ \S+ by |nothing affordable to read"
+    r"|^(BTC|ETH|SOL|XRP) (long|short) (@|posted)|^bet \S+ \[.*\] -> |^read \S+ \S+ \S+ by |nothing affordable to read"
     r"|^(Started|Waiting for|Application|Finished|Shutting down)"
 )
 

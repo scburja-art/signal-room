@@ -36,15 +36,38 @@ def payload(day: str, root_hex: str) -> bytes:
     return f"signal-room:v1:{day}:{root_hex}".encode()
 
 
-def anchor_day(db: Session, day_log: DailyLog) -> str | None:
-    """Write the day's root to chain if not already anchored. Returns the tx hash or None."""
+def _w3():
+    from web3 import Web3  # imported lazily so the platform runs without web3 when anchoring is off
+    return Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 20}))
+
+
+def _settle(db: Session, day_log: DailyLog, w3, tx_hash: str, timeout: int) -> str | None:
+    """Record the anchor once its transaction is mined. Returns the hash when mined, None while pending."""
+    try:
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+    except Exception:   # not mined yet: keep it pending, never send another
+        return None
+    if receipt.get("status") != 1:
+        day_log.pending_tx = None   # failed on-chain: a fresh transaction next time
+        db.commit()
+        raise RuntimeError(f"anchor tx {tx_hash} failed on-chain")
+    day_log.anchored_tx, day_log.pending_tx = tx_hash, None
+    db.add(AuditEvent(event="anchored", detail=f"{day_log.day} {tx_hash}"))
+    db.commit()
+    log.info("anchored %s root %s… in %s", day_log.day, day_log.merkle_root[:12], tx_hash)
+    return tx_hash
+
+
+def anchor_day(db: Session, day_log: DailyLog, receipt_timeout: int = 30) -> str | None:
+    """Write the day's root to chain if not already anchored. One transaction per day: a sent-but-unmined
+    transaction is remembered and polled on later calls, never duplicated. Returns the tx hash once mined."""
     if day_log.anchored_tx:
         return day_log.anchored_tx
     if not enabled():
         return None
-    from web3 import Web3  # imported lazily so the platform runs without web3 when anchoring is off
-
-    w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 20}))
+    w3 = _w3()
+    if day_log.pending_tx:
+        return _settle(db, day_log, w3, day_log.pending_tx, timeout=5)
     acct = w3.eth.account.from_key(PRIVATE_KEY)
     base_fee = w3.eth.get_block("latest").get("baseFeePerGas", w3.eth.gas_price)
     # L2 base fees can be far below 1 gwei; the priority tip must never exceed the max fee.
@@ -66,24 +89,6 @@ def anchor_day(db: Session, day_log: DailyLog) -> str | None:
     tx_hash = raw_hash.hex() if hasattr(raw_hash, "hex") else str(raw_hash)
     if not tx_hash.startswith("0x"):
         tx_hash = "0x" + tx_hash
-    # Only record the anchor once it is mined; a dropped tx is retried next tick.
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
-    if receipt.get("status") != 1:
-        raise RuntimeError(f"anchor tx {tx_hash} failed on-chain")
-    day_log.anchored_tx = tx_hash
-    db.add(AuditEvent(event="anchored", detail=f"{day_log.day} {tx_hash}"))
+    day_log.pending_tx = tx_hash   # remembered before anything else can go wrong
     db.commit()
-    log.info("anchored %s root %s… in %s", day_log.day, day_log.merkle_root[:12], tx_hash)
-    return tx_hash
-
-
-def verify(tx_hash: str, day: str, root_hex: str) -> bool:
-    """Anyone can check: fetch the tx and compare its data field to the expected payload."""
-    from web3 import Web3
-
-    w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 20}))
-    tx = w3.eth.get_transaction(tx_hash)
-    data = tx["input"]
-    if isinstance(data, str):
-        data = bytes.fromhex(data[2:] if data.startswith("0x") else data)
-    return bytes(data) == payload(day, root_hex)
+    return _settle(db, day_log, w3, tx_hash, timeout=receipt_timeout)

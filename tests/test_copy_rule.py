@@ -4,7 +4,7 @@ import datetime as dt
 from signal_room import service
 from signal_room.db import Signal
 from tests.api_helpers import Agent
-from tests.conftest import set_price
+from tests.conftest import set_price, start
 
 
 def test_reader_cannot_repost_a_call_it_read(client, session_factory):
@@ -27,9 +27,9 @@ def test_reader_cannot_repost_a_call_it_read(client, session_factory):
     assert author.post("/signals", {"pair": "BTC", "horizon": "15m", "direction": "long", "confidence": 0.6}).status_code == 201
 
     # Once the read call closes, the lock lifts.
-    s = session_factory()
-    sig = s.get(Signal, sid)
+    sig = start(session_factory, sid, 100.0)
     set_price(session_factory, "BTC", 101.0, when=sig.resolve_at)
+    s = session_factory()
     service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=5))
     s.close()
     set_price(session_factory, "BTC", 101.0)

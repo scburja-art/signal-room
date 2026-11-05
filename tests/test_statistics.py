@@ -5,7 +5,7 @@ import pytest
 
 from signal_room import scoring
 from signal_room.db import Signal
-from tests.conftest import set_price
+from tests.conftest import set_price, start
 from tests.test_api import Agent
 
 
@@ -58,11 +58,11 @@ def test_scoring_version_stamped_and_history_kept(client, session_factory, monke
     set_price(session_factory, "BTC", 100.0)
     sid = a.post("/signals", {"pair": "BTC", "horizon": "15m", "direction": "long", "confidence": 0.7}).json()["signal_id"]
     from signal_room import service
-    s = session_factory()
-    sig = s.query(Signal).filter_by(id=sid).first()
+    sig = start(session_factory, sid, 100.0)
     set_price(session_factory, "BTC", 101.0, when=sig.resolve_at)
+    s = session_factory()
     service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=1))
-    s.refresh(sig)
+    sig = s.query(Signal).filter_by(id=sid).first()
     assert sig.scoring_version == scoring.SCORING_VERSION
     old_credit = sig.credit
     # A later "rule change" must not touch an already-resolved signal.

@@ -210,7 +210,7 @@ def run_slot(client: SignalRoomClient, http: httpx.Client, hour: dt.datetime) ->
     for pair, (direction, confidence) in decide(series, pairs).items():
         try:
             out = client.post_signal(pair, HORIZON, direction, round(confidence, 4))
-            log.info("%s %s @%.2f -> %s", pair, direction, out["price_at_submit"], out["signal_id"])
+            log.info("%s %s posted -> %s", pair, direction, out["signal_id"])
         except SignalRoomError as e:
             log.warning("%s: %s", pair, e)
 
@@ -223,4 +223,7 @@ def main(base_url: str, state_path: str) -> None:
         now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
         slot = next_slot(now)
         time.sleep(max(0.0, (slot - now).total_seconds() + POST_AFTER_SECONDS))
-        run_slot(client, http, slot)
+        try:
+            run_slot(client, http, slot)
+        except Exception as e:   # server restart, network blip: skip the slot, keep the schedule
+            log.warning("slot %s failed (%s)", slot.strftime("%H:%M"), type(e).__name__)

@@ -38,8 +38,10 @@ def test_signal_due_during_sleep_is_scored_not_voided(client, session_factory, m
     sid = a.post("/signals", {"pair": "ETH", "horizon": "15m", "direction": "long", "confidence": 0.8}).json()["signal_id"]
     s = session_factory()
     sig = s.query(Signal).filter_by(id=sid).first()
-    # No live prices around the horizon (laptop was asleep). Exchanges have the candles.
-    series = {sig.resolve_at.replace(second=0, microsecond=0) + dt.timedelta(minutes=i): 102.0 for i in range(-2, 3)}
+    # The laptop went to sleep right after the post: no live sample for the start, none around the
+    # horizon. Exchanges have the candles: 100 at the first minute after the post, 102 from the horizon on.
+    first_minute = sig.submitted_at.replace(second=0, microsecond=0) + dt.timedelta(minutes=1)
+    series = {first_minute + dt.timedelta(minutes=i): (100.0 if i < 14 else 102.0) for i in range(0, 20)}
     calls = []
     def fn(client_, pair, start, end):
         calls.append(pair)
@@ -48,7 +50,8 @@ def test_signal_due_during_sleep_is_scored_not_voided(client, session_factory, m
     monkeypatch.setattr(prices.httpx, "Client", lambda *a, **k: type("C", (), {"close": lambda self: None})())
     woke = sig.resolve_at + dt.timedelta(hours=6)
     assert service.resolve_due(s, now=woke) == 1
-    s.refresh(sig)
+    sig = s.query(Signal).filter_by(id=sid).first()
+    assert sig.start_at == first_minute and sig.price_at_submit == 100.0
     assert sig.result == "right" and sig.price_at_resolve == 102.0 and calls
     # and if the exchanges are unreachable on wake, it waits rather than voiding
     set_price(session_factory, "SOL", 50.0)

@@ -46,7 +46,7 @@ def run_once(client: SignalRoomClient, http: httpx.Client) -> str | None:
         direction = "long" if ret > 0 else "short"
         try:
             out = client.post_signal(pair, "1h", direction, CONFIDENCE)
-            log.info("%s %s @%.2f -> %s", pair, direction, out["price_at_submit"], out["signal_id"])
+            log.info("%s %s posted -> %s", pair, direction, out["signal_id"])
             latest = max(latest or "", out["resolve_at"])
         except SignalRoomError as e:
             if e.status == 409:
@@ -76,4 +76,9 @@ def main(base_url: str, state_path: str) -> None:
     http = httpx.Client()
     log.info("momentum control running as %s", client.agent_id)
     while True:
-        time.sleep(seconds_until_next_post(run_once(client, http)))
+        try:
+            latest = run_once(client, http)
+        except Exception as e:   # server restart, network blip: the bot must outlive it
+            log.warning("cycle failed (%s), retrying in %ss", type(e).__name__, RETRY_SECONDS)
+            latest = None
+        time.sleep(seconds_until_next_post(latest))

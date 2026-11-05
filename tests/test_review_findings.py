@@ -12,7 +12,7 @@ import pytest
 from signal_room import auth, config, scoring, service
 from signal_room.db import ReferencePrice, Signal
 from signal_room.sealing import canonical, merkle_root, sha256_hex
-from tests.conftest import set_price
+from tests.conftest import set_price, start
 from tests.test_api import Agent
 
 
@@ -46,7 +46,7 @@ def test_hash_verifiable_after_resolve(client, session_factory):
     sig = s.query(Signal).filter_by(id=sid).first()
     body = unseal(sig.agent_id, sig.body_cipher)
     assert "salt" in body and len(body["salt"]) == 32
-    assert signal_hash(sig.agent_id, "ETH", "15m", "long", 0.6, sig.submitted_at.isoformat(), 10.0, body["salt"]) == sig.hash
+    assert signal_hash(sig.agent_id, "ETH", "15m", "long", 0.6, sig.submitted_at.isoformat(), None, body["salt"]) == sig.hash
     s.close()
 
 
@@ -112,15 +112,15 @@ def test_void_flat_and_resolution_waits_for_post_horizon_sample(client, session_
     a = Agent(client, "s")
     set_price(session_factory, "XRP", 1.0)
     sid = a.post("/signals", {"pair": "XRP", "horizon": "15m", "direction": "long", "confidence": 0.7}).json()["signal_id"]
+    sig = start(session_factory, sid, 1.0)
     s = session_factory()
-    sig = s.query(Signal).filter_by(id=sid).first()
     # Only a pre-horizon sample exists and we are inside tolerance: wait, do not resolve.
     set_price(session_factory, "XRP", 1.5, when=sig.resolve_at - dt.timedelta(seconds=30))
     assert service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=5)) == 0
     # A sample at the horizon arrives, inside the flat band: resolves flat with zero credit.
     set_price(session_factory, "XRP", 1.0002, when=sig.resolve_at)
     assert service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=10)) == 1
-    s.refresh(sig)
+    sig = s.query(Signal).filter_by(id=sid).first()
     assert sig.result == "flat" and sig.credit == 0.0 and sig.resolved_at == sig.resolve_at
     # Void: a signal with no price anywhere near its horizon, and no exchange history to rebuild it from.
     s.query(ReferencePrice).delete(); s.commit()
@@ -139,17 +139,16 @@ def test_one_bad_row_does_not_stall_resolution(client, session_factory):
     a = Agent(client, "s")
     set_price(session_factory, "BTC", 100.0)
     good = a.post("/signals", {"pair": "BTC", "horizon": "15m", "direction": "long", "confidence": 0.7}).json()["signal_id"]
+    sig = start(session_factory, good, 100.0)
     s = session_factory()
     now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     s.add(Signal(id="bad1", agent_id=a.id, pair="ETH", horizon="15m", body_cipher="not-a-token", hash="h",
                  submitted_at=now, resolve_at=now, price_at_submit=1.0))
     s.commit()
-    sig = s.query(Signal).filter_by(id=good).first()
     set_price(session_factory, "BTC", 101.0, when=sig.resolve_at)
     set_price(session_factory, "ETH", 1.0, when=now)
     assert service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=5)) == 2
-    s.refresh(sig)
-    assert sig.result == "right"
+    assert s.get(Signal, good).result == "right"
     assert s.get(Signal, "bad1").result == "void"
     s.close()
 

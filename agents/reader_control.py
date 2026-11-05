@@ -87,6 +87,9 @@ def main(base_url: str, state_path: str) -> None:
     state = load(reads_path)
     log.info("reader control running as %s", client.agent_id)
     while True:
-        run_once(client, state, time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()))
-        save(reads_path, state)
+        try:
+            run_once(client, state, time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()))
+            save(reads_path, state)
+        except Exception as e:   # server restart, network blip: the bot must outlive it
+            log.warning("cycle failed (%s), retrying next hour", type(e).__name__)
         time.sleep(INTERVAL_SECONDS)

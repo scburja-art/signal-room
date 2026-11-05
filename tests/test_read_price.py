@@ -6,22 +6,13 @@ import pytest
 from signal_room import config, service
 from signal_room.db import Signal
 from tests.api_helpers import Agent
-from tests.conftest import set_price
+from tests.conftest import set_price, spread
 from tests.test_delisting import post_and_resolve
 
 
 @pytest.fixture(autouse=True)
 def no_rate_limit(monkeypatch):
     monkeypatch.setattr(config, "RATE_LIMIT_PER_MINUTE", 10_000)
-
-
-def spread(factory, agent_id):
-    """The helper posts in a burst; real calls are minutes apart. Space them so each is its own try."""
-    s = factory()
-    for i, sig in enumerate(s.query(Signal).filter_by(agent_id=agent_id).order_by(Signal.submitted_at).all()):
-        sig.submitted_at = sig.submitted_at - dt.timedelta(minutes=15 * (100 - i))
-    s.commit()
-    s.close()
 
 
 def test_read_cost_follows_the_authors_verdict(client, session_factory):

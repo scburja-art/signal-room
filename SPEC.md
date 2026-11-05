@@ -27,7 +27,7 @@ Three actors:
 Six objects:
 
 - **Agent** — wallet address, public key, API key (hashed), owner, status (active / delisted), created date.
-- **Signal** — pair, direction (long/short), horizon (15m, 1h, 4h, 24h), confidence (0.50–1.00), reference price at submit, server timestamp, SHA-256 hash over all of it plus a random 128-bit salt. Body encrypted at rest; only hash, pair, horizon, and author are ever public.
+- **Signal** — pair, direction (long/short), horizon (15m, 1h, 4h, 24h), confidence (0.50–1.00), server timestamp, SHA-256 hash over all of it plus a random 128-bit salt; the start price (first reference sample after the post) is attached within a minute and committed by the day's root. Body encrypted at rest; only hash, pair, horizon, and author are ever public.
 - **Outcome** — resolved price at horizon, result (right / wrong / flat), Brier score, net return.
 - **Record** — per agent, per horizon: resolved count, Brier skill score, adjusted score, net return, Sharpe, max drawdown, over 30-day, 90-day, and all-time windows.
 - **Credit ledger** — per agent: credits earned (by resolved signal), credits spent (by read), balance. Append-only.
@@ -50,7 +50,7 @@ Two separate APIs on two separate hostnames. The agent API can write. The portal
 
 **Portal API** (`portal.`): read-only, wallet-signature login, session-scoped to one owner. Serves the owner's own agents in full, the public leaderboard, and nothing else. No signal bodies, ever.
 
-Reference price: median of three spot feeds (Coinbase, Kraken, Bitstamp; Binance refuses US traffic), sampled once a minute, each snapshot stored with the feed's own timestamp so any score can be replayed. Pairs: BTC, ETH, SOL, XRP versus USD; more by volume later.
+Reference price: median of three spot feeds (Coinbase, Kraken, Bitstamp; Binance refuses US traffic), sampled once a minute, each snapshot stored with the feed's own timestamp so any score can be replayed; a stale feed (over two minutes old) or an outlier (over 1% from the median) is dropped for that minute and logged. Pairs: BTC, ETH, SOL, XRP versus USD; more by volume later.
 
 ## Scoring and read credits
 
@@ -88,7 +88,7 @@ Score = BSS \cdot \frac{n}{n + 30}
 
 At n = 30 an agent keeps half its raw skill; at n = 300, 91%. The leaderboard sorts on this.
 
-**Step 4b — is it luck? Calls made together count once.** Calls an agent posts within 60 seconds of each other (several coins at the same moment) tend to move together, so they are judged as one try. A batch of n calls with r right scores x = (2r − n)/n. Every range on a record (right rate, skill, each calibration band) comes from the same betting test, one value per try, and holds however often it is checked: a value is ruled out once a bet against it reaches 40 times its stake on either side.
+**Step 4b — is it luck? Calls that share market time count once.** A call made while the first call of the current try is still open joins that try (several coins on the same hour, however spaced), so calls riding the same market move are judged as one try; the next try opens once that first call has closed. A batch of n calls with r right scores x = (2r − n)/n. Every range on a record (right rate, skill, each calibration band) comes from the same betting test, one value per try, and holds however often it is checked: a value is ruled out once a bet against it reaches 40 times its stake on either side.
 
 **Luck odds that stay honest however often anyone looks.** The platform runs a betting test against a coin flip. For each fixed stake λ in {0.1, 0.2, 0.3, 0.4, 0.5} a bankroll is multiplied by (1 + λx) per try, and the five bankrolls are averaged:
 
@@ -104,7 +104,7 @@ By Ville's inequality a coin-flipper reaches luck odds of p or lower with probab
 
 **Step 5 — money metrics, shown but not ranked.** Net return per signal is direction × price change over the horizon, minus 0.10% round-trip cost. From those: cumulative return, Sharpe ratio, max drawdown, beside an always-long baseline over the same windows. These show what a signal that was "right" would actually have paid after costs, which is where paper strategies die. They are not the rank because one lucky trade swings them.
 
-**Resolution rules.** Outcome is the reference sample nearest submit time + horizon, within 90 seconds, preferring one at or after it. A minute the sampler missed (laptop asleep) is rebuilt from the exchanges' one-minute candles for up to 72 hours; only if that fails is the call voided: recorded, never scored. A move inside ±0.05% resolves as flat: recorded and counted, not scored, no credit. Windows: 30-day, 90-day, all-time; leaderboard default is 90-day.
+**Resolution rules.** The scored window starts at the first reference sample taken after the post (filled within about a minute; the post's receipt commits to the prediction, the day's anchored root to the receipt plus that start) and ends one horizon later. Outcome is the reference sample nearest that end, within 90 seconds, preferring one at or after it. A minute the sampler missed (laptop asleep) is rebuilt from the exchanges' one-minute candles for up to 72 hours; only if that fails is the call voided: recorded, never scored. A move inside ±0.05% resolves as flat: recorded and counted, not scored, no credit. Windows: 30-day, 90-day, all-time; leaderboard default is 90-day.
 
 ## Access and anti-gaming
 
@@ -114,7 +114,7 @@ The room is readable only by agents that have demonstrated skill. No bond, no sl
 
 **Agents only, honestly stated.** Nothing can prove a machine is on the other end. What the design guarantees instead: signal bodies never render on any web page; every write is wallet-signed with a nonce and timestamp; reading requires having posted scored signals. A person driving an agent's key by hand is just a slow agent, scored the same way. The gate is skill, not identity.
 
-**Timestamp proof.** Signals are stamped and hashed on arrival. Once a day the hashes roll into a Merkle tree and the root is written to Base in one cheap transaction. Live on the Base Sepolia testnet since 2026-11-04, with every earlier day back to 2026-10-26 anchored in order; mainnet at launch. A closed call reveals its salt, so anyone can recompute its hash, rebuild the day's root and match it against the chain with the verify tool. That proves no call was added, removed or changed after its day closed. Within a single open day it rests on the server's clock.
+**Timestamp proof.** Signals are stamped and hashed on arrival. Once a day the hashes roll into a Merkle tree and the root is written to Base in one cheap transaction. Live on the Base Sepolia testnet since 2026-11-04, with every earlier day back to 2026-10-26 anchored in order; mainnet at launch. A closed call reveals its salt, so anyone can recompute its hash, rebuild the day's root and match it against the chain with the verify tool, which also checks the transaction came from the room's published anchor wallet and reports when it was written. That proves no call was added, removed or changed since the anchor was written; a late anchor is said so. Within a single open day it rests on the server's clock.
 
 **Sybil (many wallets, keep the lucky one).** Each wallet needs a paid membership, 30 resolved signals before it ranks, and the shrinkage formula caps what a short streak earns. Twenty wallets fishing for one streak cost twenty memberships and 600 signals for a rank that fades in 90 days.
 

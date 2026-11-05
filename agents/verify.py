@@ -4,15 +4,19 @@ For one closed day this checks three links, using its own math and only what any
 can see, so it trusts nothing the room says:
 
   1. every closed call's hash, recomputed from what the call revealed when it closed (direction,
-     confidence, price, time, salt), matches the hash the room published for it that day;
-  2. the day's Merkle root, rebuilt from those hashes, matches the root the room says it anchored;
-  3. that root is exactly what the public blockchain transaction carries.
+     confidence, time, salt; plus the start price for calls from before 2026-11-05), matches the
+     hash the room published for it that day, and so does its leaf (hash + the start the room gave it);
+  2. the day's Merkle root, rebuilt from those leaves, matches the root the room says it anchored;
+  3. that root is exactly what the public blockchain transaction carries, the transaction was sent
+     by the room's published anchor wallet, and when it was written is reported. The chain proves
+     nothing changed SINCE that moment; an anchor written long after the day is said so.
 
-If someone changed a call after the fact, link 1 breaks. If calls were added or removed, link 2
-breaks. If the published record was rewritten after anchoring, link 3 breaks.
+If someone changed a call or its start price after the fact, link 1 breaks. If calls were added or
+removed, link 2 breaks. If the published record was rewritten after anchoring, link 3 breaks.
 
-Reading a closed call is free. Requests are paced under the room's rate limit, so a full day takes a
-few minutes; `--sample N` checks N random calls instead of all.
+Calls still open are skipped (reading them would cost credits); a day is only fully checkable once
+every call in it has closed. Reading a closed call is free. Requests are paced under the room's rate
+limit, so a full day takes a few minutes; `--sample N` checks N random calls instead of all.
 """
 from __future__ import annotations
 
@@ -29,6 +33,11 @@ import httpx
 
 RPC_URL = os.getenv("ANCHOR_RPC_URL", "https://sepolia.base.org")
 EXPLORER = os.getenv("ANCHOR_EXPLORER", "https://sepolia.basescan.org/tx/")
+# The room's anchor wallet, published out of band (README). A transaction from any other sender
+# proves nothing about this room. Override with SIGNAL_ROOM_ANCHOR_WALLET for another deployment.
+ANCHOR_WALLET = os.getenv("SIGNAL_ROOM_ANCHOR_WALLET", "0xea11b5E115F0a6CE69FC3dA217e66d1199411A32")
+LATE_ANCHOR_HOURS = 48   # an anchor written later than this after the day closed is flagged as late
+HORIZON_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "24h": 86400}
 
 
 # ---------- the math, written out here so nothing is taken on trust ----------
@@ -38,14 +47,27 @@ def _canonical(d: dict) -> bytes:
 
 
 def call_hash(agent_id: str, pair: str, horizon: str, direction: str, confidence: float,
-              submitted_at_iso: str, price_at_submit: float, salt: str | None) -> str:
-    """A call's hash. Calls from before 2026-10-28 have no salt and use the original format."""
+              submitted_at_iso: str, price_at_submit: float | None, salt: str | None,
+              hash_version: int | None = None) -> str:
+    """A call's hash. Calls from before 2026-10-28 have no salt (format 1); from 2026-11-05 (format 3)
+    the start price is set after the post, so it is not in the hash."""
     fields = {"agent": agent_id, "pair": pair, "horizon": horizon, "direction": direction,
-              "confidence": round(confidence, 4), "submitted_at": submitted_at_iso,
-              "price_at_submit": price_at_submit}
+              "confidence": round(confidence, 4), "submitted_at": submitted_at_iso}
+    if hash_version != 3:
+        fields["price_at_submit"] = price_at_submit
     if salt is not None:
         fields["salt"] = salt
     return hashlib.sha256(_canonical(fields)).hexdigest()
+
+
+def leaf_hash(call_hash_hex: str, start_at_iso: str, price_at_submit: float) -> str:
+    """What the day's root commits to for a call with a start: receipt hash + start time + start price."""
+    return hashlib.sha256(_canonical({"hash": call_hash_hex, "start_at": start_at_iso,
+                                      "price_at_submit": price_at_submit})).hexdigest()
+
+
+def leaf_of(item: dict) -> str:
+    return leaf_hash(item["hash"], item["start_at"], item["price_at_submit"]) if item.get("start_at") else item["hash"]
 
 
 def merkle_root(hashes: list[str]) -> str:
@@ -90,25 +112,39 @@ def chain_lookup(tx_hash: str, rpc_url: str = RPC_URL) -> dict:
 
 # ---------- the check ----------
 
+def is_open(item: dict, now: dt.datetime) -> bool:
+    """From the listing alone. The listing says whether a call has closed; if the room lied, the read
+    would show no result and the call counts as open anyway (the verdict is then NOT YET, never VERIFIED)."""
+    if "resolved" in item:
+        return not item["resolved"]
+    return dt.datetime.fromisoformat(item["resolve_at"]) + dt.timedelta(seconds=120) > now
+
+
 def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, pause: float = 1.1,
-               progress=lambda done, total: None) -> dict:
+               progress=lambda done, total: None, now: dt.datetime | None = None,
+               anchor_wallet: str | None = ANCHOR_WALLET) -> dict:
     """Run all three checks for one closed day. `client` needs log(day) and read(signal_id)."""
+    now = now or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     log = client.log(day)
     listed = log["signals"]
     out = {"day": day, "calls": len(listed), "anchored_tx": log.get("anchored_tx"),
            "checked": 0, "matched": 0, "mismatched": [], "still_open": 0}
 
-    # Link 1: each call's hash from what it revealed.
-    todo = listed if not sample or sample >= len(listed) else random.Random(day).sample(listed, sample)
+    # Link 1: each call's hash and leaf from what it revealed. Open calls are skipped, never read:
+    # reading an open call costs credits and the verifier is not here to buy anything.
+    closed = [x for x in listed if not is_open(x, now)]
+    out["still_open"] = len(listed) - len(closed)
+    todo = closed if not sample or sample >= len(closed) else random.Random(day).sample(closed, sample)
     for i, item in enumerate(todo, 1):
         body = client.read(item["signal_id"])
         if body.get("result") is None:
             out["still_open"] += 1
         else:
             h = call_hash(body["agent_id"], body["pair"], body["horizon"], body["direction"], float(body["confidence"]),
-                          body["submitted_at"], body["price_at_submit"], body.get("salt"))
+                          body["submitted_at"], body["price_at_submit"], body.get("salt"), body.get("hash_version"))
+            lf = leaf_hash(h, body["start_at"], body["price_at_submit"]) if body.get("start_at") else h
             out["checked"] += 1
-            if h == item["hash"] == body["hash"]:
+            if h == item["hash"] == body["hash"] and lf == item.get("leaf", item["hash"]):
                 out["matched"] += 1
             else:
                 out["mismatched"].append(item["signal_id"])
@@ -116,15 +152,25 @@ def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, 
         if pause and i < len(todo):
             time.sleep(pause)
 
-    # Link 2: the day's root from the published hashes.
-    out["root"] = merkle_root([x["hash"] for x in listed])
+    # Link 2: the day's root from the published leaves.
+    out["root"] = merkle_root([leaf_of(x) for x in listed])
     out["root_matches_anchor"] = out["root"] == log.get("anchored_root")
 
     # Link 3: the chain.
     out["chain"] = chain(log["anchored_tx"]) if log.get("anchored_tx") else {"found": False}
-    out["chain_matches"] = bool(out["chain"].get("found") and out["chain"].get("success")
-                                and out["chain"].get("payload") == expected_payload(day, out["root"]))
-    out["ok"] = (not out["mismatched"]) and out["root_matches_anchor"] and out["chain_matches"]
+    c = out["chain"]
+    out["chain_matches"] = bool(c.get("found") and c.get("success") and c.get("payload") == expected_payload(day, out["root"]))
+    sender = (c.get("sender") or "").lower()
+    out["sender_matches"] = bool(c.get("found")) and (anchor_wallet is None or sender == anchor_wallet.lower())
+    out["anchored_at"] = c.get("time")
+    day_end = dt.datetime.fromisoformat(day) + dt.timedelta(days=1)
+    out["anchor_late_hours"] = None
+    if out["anchored_at"] is not None:
+        at = out["anchored_at"].replace(tzinfo=None) if out["anchored_at"].tzinfo else out["anchored_at"]
+        late = (at - day_end).total_seconds() / 3600
+        out["anchor_late_hours"] = round(late, 1) if late > LATE_ANCHOR_HOURS else 0
+    out["ok"] = ((not out["mismatched"]) and out["root_matches_anchor"] and out["chain_matches"]
+                 and out["sender_matches"] and out["still_open"] == 0)
     return out
 
 
@@ -146,9 +192,18 @@ def report(r: dict) -> str:
         when = c["time"].astimezone().strftime("%b %d %I:%M %p").replace(" 0", " ")
         lines.append(f"  {'✔' if r['chain_matches'] else '✘'} chain: the public transaction "
                      f"{'carries exactly this fingerprint' if r['chain_matches'] else 'does NOT carry this fingerprint'}, written {when}")
+        if not r["sender_matches"]:
+            lines.append(f"  ✘ chain: it was sent by {c.get('sender')}, not the room's published anchor wallet")
+        if r["anchor_late_hours"]:
+            lines.append(f"  ⚠ chain: anchored {r['anchor_late_hours'] / 24:.1f} days after the day closed; the record could have been edited before then")
         lines.append(f"    {EXPLORER}{r['anchored_tx']}")
-    lines.append("VERIFIED: nothing in this day's record was changed after it was anchored." if r["ok"]
-                 else "NOT VERIFIED: see the ✘ lines above.")
+    if r["ok"]:
+        since = c["time"].astimezone().strftime("%b %d %I:%M %p").replace(" 0", " ")
+        lines.append(f"VERIFIED: nothing in this day's record has changed since it was anchored ({since}).")
+    elif r["still_open"] and not r["mismatched"] and r["root_matches_anchor"] and r["chain_matches"] and r["sender_matches"]:
+        lines.append(f"NOT YET: {r['still_open']} calls are still open; check again once the day has fully closed.")
+    else:
+        lines.append("NOT VERIFIED: see the ✘ lines above.")
     return "\n".join(lines)
 
 

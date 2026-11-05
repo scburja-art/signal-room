@@ -6,7 +6,12 @@ settings. Nothing is tuned here; the settings are imported from the live bot. Ca
 own scoring code (flat band, Brier, batches, luck odds), so the numbers read like a room record.
 
 This is not proof. It is history the bot's design could, in principle, have been fitted to; only the room's
-forward record counts. It answers one question: does v1 start out ahead of a coin flip, or not.
+forward record counts. It answers one question: does the bot start out ahead of a coin flip, or not.
+
+Scoring follows the room's rule set 3: a call's window starts at the first reference sample taken after the
+post. For v2 that is the minute after the post (scored from W+2m to W+17m, while its one fact ends at W+1m).
+For v1 it is about a minute into the hour; with hourly candles the replay scores from the hour itself, one
+minute early, which is the one place the replay is not exactly live.
 """
 from __future__ import annotations
 
@@ -84,7 +89,9 @@ def replay_v2(series: dict[str, dict[int, float]], first_w: int, last_w: int) ->
         for pair in f2.group_for(w):
             f = pre[pair][w][0]
             c = f2.call(wts, f) if f is not None else None
-            a, b = series[pair].get(w + f2.FIRST), series[pair].get(w + f2.FIRST + f2.WINDOW)
+            # The room starts the window at its first sample after the post (W+1m+8s), i.e. in the next
+            # minute, and ends it one horizon later. Score the same stretch, not the one the model saw.
+            a, b = series[pair].get(w + f2.ROOM_START), series[pair].get(w + f2.ROOM_START + f2.WINDOW)
             if c is None or a is None or b is None:
                 continue
             direction, confidence = c
