@@ -1,4 +1,4 @@
-"""Entry point: ./start.sh agent momentum | meanrev | forecaster | reader | kakalshi <shadow_results.json>"""
+"""Entry point: ./start.sh agent momentum | meanrev | forecaster | forecaster2 | reader | kakalshi <shadow_results.json>"""
 import logging
 import os
 import sys
@@ -12,7 +12,7 @@ STATE_DIR = os.path.join(os.path.dirname(__file__), "state")
 
 def main(argv: list[str]) -> None:
     if not argv:
-        raise SystemExit("usage: agent momentum | agent meanrev | agent forecaster | agent reader | agent kakalshi <path/to/shadow_results.json>")
+        raise SystemExit("usage: agent momentum | agent meanrev | agent forecaster | agent forecaster2 | agent reader | agent kakalshi <path/to/shadow_results.json>")
     which = argv[0]
     if which == "momentum":
         from . import momentum_control
@@ -23,6 +23,9 @@ def main(argv: list[str]) -> None:
     elif which == "forecaster":
         from . import forecaster
         forecaster.main(BASE_URL, os.path.join(STATE_DIR, "forecaster.json"))
+    elif which == "forecaster2":
+        from . import forecaster_v2
+        forecaster_v2.main(BASE_URL, os.path.join(STATE_DIR, "forecaster2.json"))
     elif which == "reader":
         from . import reader_control
         reader_control.main(BASE_URL, os.path.join(STATE_DIR, "reader.json"))
