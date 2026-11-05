@@ -31,7 +31,9 @@ def verdict_before(db, agent: Agent, start: dt.datetime) -> str | None:
             .filter(Signal.agent_id == agent.id, Signal.result.in_(("right", "wrong", "flat")),
                     Signal.resolved_at < start, Signal.resolved_at >= start - dt.timedelta(days=90))
             .order_by(Signal.resolved_at).all())
-    return service._record(rows, 1, start)["verdict"] if rows else None
+    if not rows:
+        return None
+    return agent.status if agent.status != "active" else service._record(rows, 1, start)["verdict"]
 
 
 def bot_lines(db, agent: Agent, start: dt.datetime, end: dt.datetime) -> list[str] | None:

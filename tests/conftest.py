@@ -47,7 +47,9 @@ def session_factory(monkeypatch, request, tmp_path):
 def client(session_factory, monkeypatch):
     from signal_room import api, config
     monkeypatch.setattr(config, "REGISTRATIONS_PER_HOUR", 10_000)
+    monkeypatch.setattr(config, "CHALLENGES_PER_HOUR_PER_IP", 10_000)
     api._reg_times.clear()
+    api._challenge_times.clear()
     return TestClient(api.app)
 
 

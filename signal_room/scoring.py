@@ -343,7 +343,8 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
         sd = math.sqrt(var)
         if sd > 0:
-            sharpe = mean / sd * math.sqrt(len(returns))
+            sharpe = mean / sd   # per call: mean net return over its spread. Not annualised (windows differ) and
+            #                      not multiplied by sqrt(n), which would make it a t-statistic that grows with n.
     batches = _batches(hits, cl)
     p, p_worse = luck_odds(batches)
     p, p_worse = min(1.0, p * slices), min(1.0, p_worse * slices)

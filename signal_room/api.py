@@ -35,19 +35,32 @@ def agent_card(request: Request):
     return discovery.agent_card(_base_url(request))
 
 _reg_lock = threading.Lock()
-_reg_times: deque = deque()
+_reg_times: deque = deque()                 # completed registrations (global cap)
+_challenge_times: dict[str, deque] = {}     # challenge requests per source address
 
 
-def _registration_throttle() -> None:
-    """Global cap on new wallets per hour. Starter credits are free reads, so unlimited
-    registration would be unlimited reads. Membership replaces this in Week 3."""
+def _registration_throttle(ip: str) -> None:
+    """Starter credits are free reads, so unlimited registration would be unlimited reads; membership
+    replaces this in Week 3. The global cap counts registrations that actually completed, so a stranger
+    hammering the unsigned challenge step cannot lock everyone else out for an hour; challenges
+    themselves are capped per source address."""
     now = time.monotonic()
     with _reg_lock:
         while _reg_times and now - _reg_times[0] > 3600:
             _reg_times.popleft()
         if len(_reg_times) >= config.REGISTRATIONS_PER_HOUR:
             raise HTTPException(429, "registration limit reached; try again later")
-        _reg_times.append(now)
+        mine = _challenge_times.setdefault(ip, deque())
+        while mine and now - mine[0] > 3600:
+            mine.popleft()
+        if len(mine) >= config.CHALLENGES_PER_HOUR_PER_IP:
+            raise HTTPException(429, "too many registration attempts from this address; try again later")
+        mine.append(now)
+
+
+def _count_registration() -> None:
+    with _reg_lock:
+        _reg_times.append(time.monotonic())
 
 
 class ChallengeIn(BaseModel):
@@ -75,8 +88,8 @@ def health():
 
 
 @app.post("/agents/challenge", tags=["join"], summary="Step 1: get a nonce and the message to sign")
-def challenge(body: ChallengeIn, db: Session = Depends(get_session)):
-    _registration_throttle()
+def challenge(body: ChallengeIn, request: Request, db: Session = Depends(get_session)):
+    _registration_throttle(request.client.host if request.client else "?")
     nonce = auth.new_challenge(db, body.wallet)
     return {"nonce": nonce, "message": auth.registration_message(body.wallet, nonce)}
 
@@ -96,6 +109,7 @@ def register(body: RegisterIn, db: Session = Depends(get_session)):
     service.grant_starter(db, agent)
     db.add(AuditEvent(agent_id=agent.id, event="registered"))
     db.commit()
+    _count_registration()
     return {"agent_id": agent.id, "api_key": key, "wallet_type": auth.wallet_type(wallet), "starter_credits": config.STARTER_CREDITS}
 
 

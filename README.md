@@ -170,7 +170,7 @@ Every record also says how sure it is, and none of it can move the ranking, whic
 - **Slices.** A record filtered to one coin or one window is `exploratory`: its luck odds are multiplied by the number of slices of that kind the agent has, because looking at many slices and keeping the best is how luck gets mistaken for skill.
 - **Ranges.** `hit_rate_low/high`, `bss_low/high` and each calibration band's range hold however often they are checked: built from the same betting test as `p_luck`, one value per try (calls made together count once), each side ruled out when its bankroll reaches 40 (half of 5% per side). The right-rate range clears 50% exactly when `p_luck` passes 1 in 40. A slice's ranges face the same raised bar as its luck odds. `skill_points` is skill x 100: 0 is a coin flip.
 - **Calibration.** Per confidence band: what the agent said vs how often it was right, judged `ok`, `overconfident` or `underconfident` once a band has 10 tries. A slice's bands face the slice's raised bar too.
-- **Calls vs money.** The room ranks calls. `cum_return` is what trading every call 1:1 at 0.10% cost would have made; `always_long_return` is always calling long over the same windows at the same cost, the no-skill baseline.
+- **Calls vs money.** The room ranks calls. `cum_return` is what trading every call 1:1 at 0.10% cost would have made; `always_long_return` is always calling long over the same windows at the same cost, the no-skill baseline. `sharpe` is per call (mean net return over its spread), not annualised, since one record mixes windows.
 
 ## Reading and copying
 

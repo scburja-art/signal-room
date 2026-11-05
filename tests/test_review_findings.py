@@ -194,8 +194,8 @@ def test_registration_throttle(client, session_factory, monkeypatch):
     monkeypatch.setattr(config, "REGISTRATIONS_PER_HOUR", 2)
     api._reg_times.clear()
     from eth_account import Account
-    codes = [client.post("/agents/challenge", json={"wallet": Account.create().address}).status_code for _ in range(3)]
-    assert codes == [200, 200, 429]
+    Agent(client, "one"), Agent(client, "two")
+    assert client.post("/agents/challenge", json={"wallet": Account.create().address}).status_code == 429
 
 
 def test_kakalshi_adapter_helpers(tmp_path):
@@ -237,3 +237,40 @@ def test_mean_reversion_is_momentum_mirrored(monkeypatch):
     monkeypatch.setattr(mr, "last_hour_return", mo.last_hour_return)
     assert mo.run_once(C(), None) == "2026-10-29T23:00:00" and mr.run_once(C(), None) == "2026-10-29T23:00:00"
     assert posted == {"BTC": ["long", "short"], "ETH": ["long", "short"], "SOL": ["short", "long"], "XRP": ["short", "long"]}
+
+
+def test_challenge_flood_does_not_lock_out_real_registrations(client, session_factory, monkeypatch):
+    """Minor finding 2026-11-04: 20 unsigned challenge requests used to block every registration for an hour."""
+    from signal_room import api
+    from eth_account import Account
+    monkeypatch.setattr(config, "REGISTRATIONS_PER_HOUR", 2)
+    monkeypatch.setattr(config, "CHALLENGES_PER_HOUR_PER_IP", 1000)
+    api._reg_times.clear(); api._challenge_times.clear()
+    for _ in range(25):   # a stranger asking for challenges and never signing them
+        assert client.post("/agents/challenge", json={"wallet": Account.create().address}).status_code == 200
+    assert Agent(client, "real-1").id and Agent(client, "real-2").id      # two completed registrations still fit
+    assert client.post("/agents/challenge", json={"wallet": Account.create().address}).status_code == 429
+
+
+def test_challenges_are_capped_per_address(client, session_factory, monkeypatch):
+    from signal_room import api
+    from eth_account import Account
+    monkeypatch.setattr(config, "CHALLENGES_PER_HOUR_PER_IP", 3)
+    api._reg_times.clear(); api._challenge_times.clear()
+    codes = [client.post("/agents/challenge", json={"wallet": Account.create().address}).status_code for _ in range(4)]
+    assert codes == [200, 200, 200, 429]
+
+
+def test_a_corrupt_sealed_row_does_not_break_me_or_reads(client, session_factory):
+    a, r = Agent(client, "s"), Agent(client, "r")
+    set_price(session_factory, "BTC", 100.0)
+    good = a.post("/signals", {"pair": "BTC", "horizon": "15m", "direction": "long", "confidence": 0.7}).json()["signal_id"]
+    s = session_factory()
+    s.add(Signal(id="bad2", agent_id=a.id, pair="ETH", horizon="15m", body_cipher="not-a-token", hash="h", hash_version=3,
+                 submitted_at=dt.datetime(2026, 1, 1), resolve_at=dt.datetime(2026, 1, 1, 0, 15), price_at_submit=1.0))
+    s.commit(); s.close()
+    me = a.get("/me")
+    assert me.status_code == 200
+    rows = {x["signal_id"]: x for x in me.json()["signals"]}
+    assert rows[good]["direction"] == "long" and rows["bad2"]["direction"] is None
+    assert r.get("/room/bad2").status_code == 200 and r.get("/room/bad2").json()["direction"] is None

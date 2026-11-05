@@ -110,9 +110,10 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
     by_pair: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     by_hz: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     day_ago = now - dt.timedelta(days=1)
+    since = service._since("90d")
     recent = [0, 0]
     for s in rows:
-        if s.result not in ("right", "wrong"):
+        if s.result not in ("right", "wrong") or s.resolved_at < since:   # same window as the headline
             continue
         by_pair[s.pair][1] += 1
         by_hz[s.horizon][1] += 1
@@ -122,7 +123,7 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
         if s.resolved_at and s.resolved_at >= day_ago:
             recent[1] += 1
             recent[0] += s.result == "right"
-    out.append("    slices, exploratory (not verdicts; each one faces a higher bar):")
+    out.append("    slices over the same 90 days, exploratory (not verdicts; each one faces a higher bar):")
     out.append("      by coin: " + ", ".join(f"{p} {r}/{n}" for p, (r, n) in sorted(by_pair.items())))
     if len(by_hz) > 1:
         out.append("      by window: " + ", ".join(f"{h} {r}/{n}" for h, (r, n) in sorted(by_hz.items())))

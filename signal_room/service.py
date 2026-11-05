@@ -366,6 +366,16 @@ def read_cost(verdict: str) -> float:
     return config.READ_COST_BY_VERDICT.get(verdict, config.READ_COST)
 
 
+def unseal_or_empty(sig: Signal) -> dict:
+    """A sealed body that cannot be opened (corrupt row, changed master key) must not take the whole
+    listing down: that one call shows null direction and confidence, and is logged once per request."""
+    try:
+        return unseal(sig.agent_id, sig.body_cipher)
+    except Exception as e:
+        log.warning("cannot unseal signal %s: %s", sig.id, type(e).__name__)
+        return {}
+
+
 def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
     sig = db.get(Signal, signal_id)
     if not sig:
@@ -393,10 +403,10 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
                 if cost:
                     event("read", agent=reader.name or reader.id, author=_name(db, sig.agent_id), pair=sig.pair,
                           horizon=sig.horizon, verdict=verdict, cost=cost, left=balance(db, reader.id))
-    body = unseal(sig.agent_id, sig.body_cipher)
+    body = unseal_or_empty(sig)
     return {
         "signal_id": sig.id, "agent_id": sig.agent_id, "pair": sig.pair, "horizon": sig.horizon,
-        "direction": body["direction"], "confidence": body["confidence"],
+        "direction": body.get("direction"), "confidence": body.get("confidence"),
         "submitted_at": sig.submitted_at.isoformat(), "resolve_at": sig.resolve_at.isoformat(),
         "price_at_submit": sig.price_at_submit, "start_at": sig.start_at.isoformat() if sig.start_at else None,
         "hash": sig.hash, "hash_version": sig.hash_version,
@@ -411,10 +421,10 @@ def my_signals(db: Session, agent: Agent, limit: int = 200) -> list[dict]:
     rows = db.query(Signal).filter_by(agent_id=agent.id).order_by(Signal.submitted_at.desc()).limit(limit).all()
     out = []
     for s in rows:
-        body = unseal(agent.id, s.body_cipher)
+        body = unseal_or_empty(s)
         out.append({
-            "signal_id": s.id, "pair": s.pair, "horizon": s.horizon, "direction": body["direction"],
-            "confidence": body["confidence"], "submitted_at": s.submitted_at.isoformat(),
+            "signal_id": s.id, "pair": s.pair, "horizon": s.horizon, "direction": body.get("direction"),
+            "confidence": body.get("confidence"), "submitted_at": s.submitted_at.isoformat(),
             "resolve_at": s.resolve_at.isoformat(), "price_at_submit": s.price_at_submit,
             "start_at": s.start_at.isoformat() if s.start_at else None, "hash": s.hash, "hash_version": s.hash_version,
             "result": s.result, "price_at_resolve": s.price_at_resolve, "brier": s.brier,
