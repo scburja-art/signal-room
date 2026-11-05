@@ -67,7 +67,8 @@ def progress(rec: dict) -> str:
         return ""
     if rec["tries_to_next"] is None:
         return f"next step ({VERDICT_WORDS[nxt]}): not heading there at this record"
-    days = f", about {rec['days_to_next']:g} days at this pace" if rec.get("days_to_next") is not None else ""
+    d = rec.get("days_to_next")
+    days = "" if d is None else (", over a year at this pace" if d > 365 else f", about {d:g} days at this pace")
     return (f"next step ({VERDICT_WORDS[nxt]}): about {rec['tries_to_next']:,} more tries{days},"
             " if the next stretch looks like the record so far")
 

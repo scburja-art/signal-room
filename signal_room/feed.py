@@ -170,6 +170,8 @@ def versus_coin_flip(points: int) -> tuple[str, str]:
 def days_text(days: float | None) -> str:
     if days is None:
         return "—"
+    if days > 365:
+        return "over a year"
     d = max(1, round(days))
     return f"~{d} day{'s' if d != 1 else ''}"
 
@@ -216,7 +218,7 @@ def scoreboard(color: bool = True) -> list[str]:
             out.append(p(GRAY, "  ─ ─ ─"))
             for a, n, right, closed, credits in readers:
                 name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
-                out.append(f"  {name} {n} paid read{'s' if n != 1 else ''} · {right} of {closed} right · {credits:g} credits left")
+                out.append(f"  {name} {n} paid read{'s' if n != 1 else ''} · {right} of {closed} right · {credits:g} credit{'' if credits == 1 else 's'} left")
         out.append(p(GRAY, "  Ladder: Unproven → Luck → Probably not luck → Proven"))
         out.append(p(BOLD, "─" * 72))
         out.append("")

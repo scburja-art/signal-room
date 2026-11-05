@@ -110,6 +110,7 @@ def test_skill_reads_as_a_direction():
     assert feed.versus_coin_flip(-4) == ("▼ 4 worse", feed.RED)
     assert feed.versus_coin_flip(1)[0] == feed.versus_coin_flip(-1)[0] == feed.versus_coin_flip(0)[0] == "≈ even"
     assert feed.days_text(3.4) == "~3 days" and feed.days_text(0.6) == "~1 day" and feed.days_text(None) == "—"
+    assert feed.days_text(1096) == "over a year" and feed.days_text(365) == "~365 days"
 
 
 def test_anchor_lines_in_plain_words():
