@@ -30,7 +30,7 @@ NAMES = {
 }
 LOGGER_NAMES = {"agents.momentum": "Momentum", "agents.meanrev": "Mean-rev", "agents.reader": "Reader", "agents.forecaster": "Forecaster v1", "agents.forecaster2": "Forecaster v2",
                 "agents.kakalshi": "Kakalshi", "signal_room": "Room"}
-HORIZONS = {"15m": "15 min", "1h": "1 hour", "4h": "4 hours", "24h": "24 hours"}
+HORIZONS = {"15m": "15m", "1h": "1h", "4h": "4h", "24h": "24h"}
 VERDICTS = {"unproven": "Unproven", "luck": "Luck", "probably_not_luck": "Probably not luck", "proven": "Proven",
             "worse_than_chance": "Worse than chance", "delisted": "Delisted", "retired": "Retired"}
 
@@ -73,6 +73,11 @@ def local(iso_utc: str) -> str:
     return t.strftime("%I:%M %p").lstrip("0")
 
 
+def short(iso_utc: str) -> str:
+    """Local clock time without AM/PM, for a window shown beside the line's own time."""
+    return local(iso_utc).split(" ")[0]
+
+
 class Painter:
     def __init__(self, color: bool):
         self.color = color
@@ -94,14 +99,15 @@ def render_event(e: dict, when: str, p: Painter) -> str | None:
         result = e.get("result")
         if result == "void":
             return p.row(when, who, "– VOID", GRAY, f"{where} · no price could be found, not scored")
-        said = f"said {'UP' if e['direction'] == 'long' else 'DOWN'}, {e['confidence'] * 100:.0f}% sure"
-        moved = f"{money(e['start'])} → {money(e['end'])}"
+        # Kept under 101 columns at the widest case (ETH prices with cents) so a laptop-width window never wraps.
+        said = f"{'UP' if e['direction'] == 'long' else 'DOWN'} {e['confidence'] * 100:.0f}%"
+        moved = f"{money(e['start'])}→{money(e['end'])}"
         if e.get("opened"):   # which call this was: the window the room scored, in local time
-            moved = f"{local(e['opened'])}→{local(e['closed'])} · {moved}"
+            moved = f"{short(e['opened'])}→{short(e['closed'])} · {moved}"
         if result == "flat":
-            return p.row(when, who, "– FLAT", GRAY, f"{where} · {said} · {moved} · barely moved, not scored")
+            return p.row(when, who, "– FLAT", GRAY, f"{where} · {said} · {moved} · flat, not scored")
         badge, code = ("✔ RIGHT", GREEN + BOLD) if result == "right" else ("✘ WRONG", RED + BOLD)
-        credit = p(GREEN if e["credit"] >= 0 else RED, f"{e['credit']:+.2f} credits")
+        credit = p(GREEN if e["credit"] >= 0 else RED, f"{e['credit']:+.2f} cr")
         return p.row(when, who, badge, code, f"{where} · {said} · {moved} · {credit}")
     if kind == "read":
         verdict = VERDICTS.get(e.get("verdict"), e.get("verdict") or "")
@@ -226,7 +232,7 @@ def scoreboard(color: bool = True) -> list[str]:
             for a, n, right, closed, credits in readers:
                 name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
                 out.append(f"  {name} {n} paid read{'s' if n != 1 else ''} · {right} of {closed} right · {credits:g} credit{'' if credits == 1 else 's'} left")
-        out.append(p(GRAY, "  Ladder: Unproven → Luck → Probably not luck → Proven"))
+        out.append(p(GRAY, "  Ladder: Unproven → Luck → Probably not luck → Proven · cr = credits"))
         out.append(p(BOLD, "─" * 72))
         out.append("")
         return out
