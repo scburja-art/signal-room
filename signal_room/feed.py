@@ -15,6 +15,8 @@ import re
 import sys
 import time
 
+from . import config
+
 RESET, BOLD = "\033[0m", "\033[1m"
 GREEN, RED, YELLOW, GRAY, WHITE = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[37m"
 
@@ -90,11 +92,40 @@ class Painter:
         return f"{self(GRAY, f'{when:>8}')}  {name} {self(badge_code, f'{badge:<10}')} {details}"
 
 
+def direction_of(signal_id: str | None) -> str | None:
+    """Unseal one call from the local database. None if that is not possible here (no key, no row)."""
+    if not signal_id:
+        return None
+    try:
+        from .db import SessionLocal, Signal
+        from .sealing import unseal
+        db = SessionLocal()
+        try:
+            sig = db.get(Signal, signal_id)
+            return unseal(sig.agent_id, sig.body_cipher)["direction"] if sig else None
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
 def render_event(e: dict, when: str, p: Painter) -> str | None:
     kind, who = e.get("kind"), e.get("agent", "?")
     where = f"{e.get('pair', '')} · {HORIZONS.get(e.get('horizon'), e.get('horizon', ''))}"
     if kind == "posted":
-        return p.row(when, who, "NEW CALL", WHITE, f"{where} · sealed until {local(e['closes'])}")
+        return None   # shown a minute later, once the room has set the call's start price
+    if kind == "started":
+        # The operator's own view: the direction comes from the sealed database on this machine (the
+        # feed holds the master key), never from the log line, which carries only the start price.
+        side = direction_of(e.get("signal_id"))
+        start = e["start"]
+        if side is None:
+            return p.row(when, who, "NEW CALL", WHITE, f"{where} · from {money(start)} · sealed until {short(e['closes'])}")
+        up = side == "long"
+        target = start * (1 + config.FLAT_BAND) if up else start * (1 - config.FLAT_BAND)
+        return p.row(when, who, "NEW CALL", WHITE,
+                     f"{where} · {'UP' if up else 'DOWN'} from {money(start)} · wins {'above' if up else 'below'} "
+                     f"{money(target)} by {short(e['closes'])}")
     if kind == "scored":
         result = e.get("result")
         if result == "void":

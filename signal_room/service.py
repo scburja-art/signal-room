@@ -116,6 +116,9 @@ def fill_start_prices(db: Session, now: dt.datetime | None = None) -> int:
         sig.price_at_submit, sig.start_at = ref.price, ref.sampled_at
         sig.resolve_at = ref.sampled_at + dt.timedelta(seconds=config.HORIZONS[sig.horizon])
         filled += 1
+        # The call's window is now set. No direction here: open calls stay sealed in every log.
+        event("started", agent=_name(db, sig.agent_id), pair=sig.pair, horizon=sig.horizon, signal_id=sig.id,
+              start=ref.price, closes=sig.resolve_at.isoformat())
     if filled:
         db.commit()
     return filled

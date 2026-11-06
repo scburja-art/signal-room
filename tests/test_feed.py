@@ -27,8 +27,12 @@ def test_noise_is_hidden():
 
 
 def test_a_new_call_is_shown_sealed():
-    out = feed.render(ev(kind="posted", agent="momentum-control", pair="BTC", horizon="1h", closes="2026-10-31T22:59:00"), color=False)
-    assert out.startswith(" 6:00 PM  Momentum      NEW CALL   BTC · 1h · sealed until ")
+    # The post itself is silent; the call is shown once its start price is set. Without the sealed
+    # database at hand (another machine), the line shows the start and nothing about the direction.
+    assert feed.render(ev(kind="posted", agent="momentum-control", pair="BTC", horizon="1h", closes="2026-10-31T22:59:00"), color=False) is None
+    out = feed.render(ev(kind="started", agent="momentum-control", pair="BTC", horizon="1h", signal_id="nope",
+                         start=77400.0, closes="2026-10-31T22:59:00"), color=False)
+    assert out.startswith(" 6:00 PM  Momentum      NEW CALL   BTC · 1h · from $77,400 · sealed until ")
     assert "long" not in out and "short" not in out and "UP" not in out
 
 
@@ -87,16 +91,22 @@ def test_unknown_names_are_kept_readable():
     assert feed.color_of("stranger-bot") == feed.WHITE
 
 
-def test_a_real_resolution_and_post_produce_feed_lines(client, session_factory, caplog):
+def test_a_real_resolution_and_post_produce_feed_lines(client, session_factory, caplog, monkeypatch):
     import logging
+    from signal_room import db as dbmod
     from tests.api_helpers import Agent
     from tests.test_delisting import post_and_resolve
+    monkeypatch.setattr(dbmod, "SessionLocal", session_factory)   # the feed reads the same database
     a = Agent(client, "kakalshi-crypto-first-minute")
     with caplog.at_level(logging.INFO, logger="signal_room.service"):
         post_and_resolve(client, session_factory, a, 1, right=True, confidence=0.75)
     lines = [feed.render(f"{T} INFO signal_room.service: {r.getMessage()}", color=False)
              for r in caplog.records if r.getMessage().startswith("EVENT ")]
-    assert lines[0].startswith(" 6:00 PM  Kakalshi CFM  NEW CALL   BTC · 15m · sealed until")
+    lines = [x for x in lines if x]   # the bare post is silent
+    # On the operator's own machine the feed unseals the direction and says what wins: 100 ± 0.05%.
+    assert lines[0].startswith(" 6:00 PM  Kakalshi CFM  NEW CALL   BTC · 15m · UP from $100.00 · wins above $100.05 by ")
+    assert "100.05" not in "".join(r.getMessage() for r in caplog.records)   # the log carries no direction
+    assert not any('"direction"' in r.getMessage() and '"started"' in r.getMessage() for r in caplog.records)
     assert lines[1].startswith(" 6:00 PM  Kakalshi CFM  ✔ RIGHT    BTC · 15m · UP 75% · ")
     assert lines[1].endswith(" · $100.00→$101.00 · +0.75 cr")
 
