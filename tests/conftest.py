@@ -53,6 +53,18 @@ def client(session_factory, monkeypatch):
     return TestClient(api.app)
 
 
+@pytest.fixture()
+def venue(monkeypatch):
+    """A stand-in for Kalshi's public data, wired into the room's reader. No test touches the network."""
+    from signal_room import kalshi
+    from tests.kalshi_fake import FakeKalshi
+    fake = FakeKalshi()
+    monkeypatch.setattr(kalshi, "_http", fake.client())
+    kalshi._series_ok.clear()
+    yield fake
+    kalshi._series_ok.clear()
+
+
 def set_price(factory, pair: str, price: float, when: dt.datetime | None = None):
     s = factory()
     s.add(ReferencePrice(pair=pair, price=price, feeds_used=3, sampled_at=when or utcnow()))

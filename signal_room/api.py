@@ -81,10 +81,19 @@ class SignalIn(BaseModel):
     confidence: float
 
 
+class PricedIn(BaseModel):
+    """One side of a venue market, bought for no more than `limit` dollars a contract."""
+    venue: str = "kalshi"
+    market: str = Field(max_length=64)
+    side: str
+    limit: float
+    confidence: float | None = None    # stated chance of winning; omit to claim nothing beyond the price
+
+
 @app.get("/health", tags=["records"])
 def health():
     return {"ok": True, "pairs": config.PAIRS, "horizons": list(config.HORIZONS), "wallets": ["evm", "solana"],
-            "scoring_version": scoring.SCORING_VERSION}
+            "scoring_version": scoring.SCORING_VERSION, "kinds": ["plain", "priced"], "venues": ["kalshi"]}
 
 
 @app.post("/agents/challenge", tags=["join"], summary="Step 1: get a nonce and the message to sign")
@@ -119,6 +128,17 @@ def post_signal(body: SignalIn, agent: Agent = Depends(auth.signed_agent), db: S
     return {"signal_id": sig.id, "submitted_at": sig.submitted_at.isoformat(), "resolve_at": sig.resolve_at.isoformat(),
             "price_at_submit": None, "hash": sig.hash, "hash_version": sig.hash_version,
             "start": "the first reference sample after this post sets the start price; resolve_at then becomes start + horizon"}
+
+
+@app.post("/signals/priced", status_code=201, tags=["signals"], summary="Post a call on a venue market, judged against its price")
+def post_priced(body: PricedIn, agent: Agent = Depends(auth.signed_agent), db: Session = Depends(get_session)):
+    sig = service.submit_priced(db, agent, body.venue, body.market, body.side, body.limit, body.confidence)
+    # The author may know its own fill at once; nobody else sees the side or the price until the market closes.
+    return {"signal_id": sig.id, "submitted_at": sig.submitted_at.isoformat(), "resolve_at": sig.resolve_at.isoformat(),
+            "hash": sig.hash, "hash_version": sig.hash_version, "fill": sig.fill or "waiting",
+            "fill_reason": sig.fill_reason, "price": sig.fill_ask, "cost": sig.bar,
+            "note": "filled: scored against cost (price + fee) by the venue's result. unfilled: recorded, never scored. "
+                    "waiting: the venue could not be read; the fill will be decided at the worst price of that minute."}
 
 
 @app.get("/room", tags=["signals"], summary="Open signals (no direction or confidence)")

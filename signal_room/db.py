@@ -72,11 +72,30 @@ class Signal(Base):
     price_at_resolve: Mapped[float | None] = mapped_column(Float, nullable=True)
     direction: Mapped[str | None] = mapped_column(String(5), nullable=True)   # revealed on resolve
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)    # revealed on resolve
-    result: Mapped[str | None] = mapped_column(String(5), nullable=True)      # right | wrong | flat | void
+    result: Mapped[str | None] = mapped_column(String(8), nullable=True)      # right | wrong | flat | void | unfilled
     brier: Mapped[float | None] = mapped_column(Float, nullable=True)
     net_return: Mapped[float | None] = mapped_column(Float, nullable=True)
     credit: Mapped[float | None] = mapped_column(Float, nullable=True)
     scoring_version: Mapped[int | None] = mapped_column(Integer, nullable=True)  # rule set used at resolution
+    # Priced calls (rule set 4): one side of a venue market, judged against what it cost. All NULL for a
+    # plain call, whose bar is an even bet. The side, the limit and the fill stay sealed until the market
+    # closes (the fill's price would give the side away).
+    kind: Mapped[str | None] = mapped_column(String(8), nullable=True)           # NULL = plain | priced
+    venue: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    market: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fill: Mapped[str | None] = mapped_column(String(8), nullable=True)           # NULL = not decided yet | filled | unfilled
+    fill_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)   # why it was not filled
+    fill_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    fill_ask: Mapped[float | None] = mapped_column(Float, nullable=True)         # price on offer for the side
+    fill_bid: Mapped[float | None] = mapped_column(Float, nullable=True)         # best bid for the side
+    fill_size: Mapped[float | None] = mapped_column(Float, nullable=True)        # contracts on offer (history: traded that minute)
+    fill_source: Mapped[str | None] = mapped_column(String(8), nullable=True)    # live | history (worst price of the minute)
+    bar: Mapped[float | None] = mapped_column(Float, nullable=True)              # ask + fee: what the call cost
+    fade_bar: Mapped[float | None] = mapped_column(Float, nullable=True)         # the bar for betting against it
+    side: Mapped[str | None] = mapped_column(String(3), nullable=True)           # yes | no, revealed on resolve
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)      # revealed on resolve
+    venue_result: Mapped[str | None] = mapped_column(String(8), nullable=True)   # the venue's own result
+    leaf: Mapped[str | None] = mapped_column(String(64), nullable=True)          # set once the fill is decided
 
     __table_args__ = (
         Index("ix_signal_open", "agent_id", "pair", "horizon", "resolved_at"),
@@ -187,6 +206,14 @@ def init_db(eng=None):
     _migrate(eng)
 
 
+PRICED_COLUMNS = (
+    ("kind", "VARCHAR(8)"), ("venue", "VARCHAR(16)"), ("market", "VARCHAR(64)"), ("fill", "VARCHAR(8)"),
+    ("fill_reason", "VARCHAR(32)"), ("fill_at", "DATETIME"), ("fill_ask", "FLOAT"), ("fill_bid", "FLOAT"),
+    ("fill_size", "FLOAT"), ("fill_source", "VARCHAR(8)"), ("bar", "FLOAT"), ("fade_bar", "FLOAT"),
+    ("side", "VARCHAR(3)"), ("limit_price", "FLOAT"), ("venue_result", "VARCHAR(8)"), ("leaf", "VARCHAR(64)"),
+)
+
+
 def _migrate(eng) -> None:
     """Add columns introduced after the first release. create_all never alters existing tables."""
     from sqlalchemy import inspect, text
@@ -203,6 +230,10 @@ def _migrate(eng) -> None:
             conn.execute(text("ALTER TABLE signals ADD COLUMN start_at DATETIME"))
             conn.execute(text("ALTER TABLE signals ADD COLUMN hash_version INTEGER"))
             conn.execute(text("UPDATE signals SET hash_version = 2"))
+        # Rule set 4 (2026-11-11): priced calls. Every column is nullable, so a plain ADD COLUMN is enough.
+        for name, kind in PRICED_COLUMNS:
+            if name not in sig_cols:
+                conn.execute(text(f"ALTER TABLE signals ADD COLUMN {name} {kind}"))
         log_cols = {c["name"] for c in insp.get_columns("daily_logs")}
         if "pending_tx" not in log_cols:
             conn.execute(text("ALTER TABLE daily_logs ADD COLUMN pending_tx VARCHAR(80)"))

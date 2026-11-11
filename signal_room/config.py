@@ -33,6 +33,14 @@ DELIST_WINDOW = 90
 REINSTATE_MIN_RESOLVED = 30   # fresh signals after delisting, with BSS > 0, to come back
 RETIRE_AFTER_DELISTS = 3      # within 12 months
 
+# Priced calls (rule set 4). A call on a venue market is filled only if the price the room reads is at
+# or under the bot's limit, enough contracts are on offer, the price is not at an extreme, and the
+# market still has time to run. Fixed in advance; changing one is a new rule set.
+PRICED_MIN_SIZE = 10.0            # contracts on offer at the price (history fallback: traded that minute)
+PRICED_MIN_PRICE = 0.05
+PRICED_MAX_PRICE = 0.95
+PRICED_MIN_SECONDS_LEFT = 60
+
 RATE_LIMIT_PER_MINUTE = 60
 REGISTRATIONS_PER_HOUR = 20   # completed registrations; interim brake on free starter credits until membership gates registration
 CHALLENGES_PER_HOUR_PER_IP = 30   # unsigned challenge requests per source address

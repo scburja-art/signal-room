@@ -1,0 +1,254 @@
+"""A read-only window onto Kalshi's public market data. No keys, no orders, nothing written to Kalshi.
+
+The room uses it for three things about a priced call: the price on offer the moment the call lands,
+the worst price of that minute when it could not look in time, and Kalshi's own result when the
+market closes. Everything here fails safe: an answer that is missing, late or not understood raises
+VenueError, and the caller then leaves the call unfilled or waiting. It is never guessed.
+
+Only Kalshi's 15-minute up-or-down markets on the room's four coins are read (rule set 4, first
+version). Prices are dollars per contract, between 0 and 1, exactly as Kalshi sends them.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import os
+import re
+import threading
+import time
+from dataclasses import dataclass
+from decimal import ROUND_CEILING, Decimal
+
+import httpx
+
+VENUE = "kalshi"
+BASE_URL = os.getenv("SIGNAL_ROOM_KALSHI_URL", "https://api.elections.kalshi.com/trade-api/v2")
+READ_TIMEOUT = 5.0          # seconds the room waits for a live price before falling back to history
+TAKER_RATE = Decimal("0.07")   # Kalshi fee schedule (effective 2026-07-07): round up(0.07 x C x P x (1 - P))
+SERIES_CHECK_SECONDS = 3600  # how long one look at a series' fee settings is trusted
+
+_TICKER = re.compile(r"^(KX(BTC|ETH|SOL|XRP)15M)-[0-9A-Z]{6,16}-[0-9A-Z]{1,6}$")
+
+
+class VenueError(Exception):
+    """Kalshi could not be read, or its answer could not be understood."""
+
+
+class NoSuchMarket(VenueError):
+    """Kalshi says there is no market with that ticker."""
+
+
+def parse_ticker(ticker: str) -> tuple[str, str, str] | None:
+    """(series, pair, horizon) for a market the room reads, else None. KXBTC15M-26NOV111345-45 →
+    ('KXBTC15M', 'BTC', '15m')."""
+    m = _TICKER.match(ticker or "")
+    return (m.group(1), m.group(2), "15m") if m else None
+
+
+def fee(price: float) -> float:
+    """Kalshi's fee for buying one contract at this price, in dollars: 7% x price x (1 - price), rounded
+    up to the cent (how it lands on an ordinary account buying a single contract)."""
+    p = Decimal(str(round(price, 6)))
+    cents = (TAKER_RATE * 100 * p * (1 - p)).to_integral_value(rounding=ROUND_CEILING)
+    return float(cents) / 100
+
+
+def cost(ask: float) -> float:
+    """What one contract really costs: the price on offer plus the fee. This is the call's bar."""
+    return round(ask + fee(ask), 6)
+
+
+def fade_bar(bid: float | None) -> float:
+    """The bar for betting against a call: 1 minus what the other side would have cost (its price is
+    1 - bid, plus the fee on that). 0 when nobody was bidding, so fading was not possible."""
+    if bid is None or bid <= 0:
+        return 0.0
+    other = 1.0 - bid
+    return round(min(0.99, max(0.0, 1.0 - (other + fee(other)))), 6)
+
+
+# ---------- reading ----------
+
+_http: httpx.Client | None = None
+_http_lock = threading.Lock()
+
+
+def _client() -> httpx.Client:
+    global _http
+    with _http_lock:
+        if _http is None:
+            _http = httpx.Client(timeout=READ_TIMEOUT, headers={"User-Agent": "signal-room (read-only market data)"})
+        return _http
+
+
+def _get(path: str, params: dict | None = None, http: httpx.Client | None = None, timeout: float | None = None) -> dict:
+    try:
+        r = (http or _client()).get(BASE_URL + path, params=params, timeout=timeout or READ_TIMEOUT)
+    except httpx.HTTPError as e:
+        raise VenueError(f"could not reach Kalshi: {type(e).__name__}") from e
+    if r.status_code == 404:
+        raise NoSuchMarket(path)
+    if r.status_code != 200:
+        raise VenueError(f"Kalshi answered {r.status_code} for {path}")
+    try:
+        body = r.json()
+    except ValueError as e:
+        raise VenueError("Kalshi's answer was not JSON") from e
+    if not isinstance(body, dict):
+        raise VenueError("Kalshi's answer was not an object")
+    return body
+
+
+def _dollars(value) -> float:
+    try:
+        x = float(value)
+    except (TypeError, ValueError) as e:
+        raise VenueError(f"not a price: {value!r}") from e
+    if not 0.0 <= x <= 1.0:
+        raise VenueError(f"price out of range: {value!r}")
+    return x
+
+
+def _count(value) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError) as e:
+        raise VenueError(f"not a size: {value!r}") from e
+
+
+def _time(value) -> dt.datetime:
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(dt.timezone.utc).replace(tzinfo=None)
+    except ValueError as e:
+        raise VenueError(f"not a time: {value!r}") from e
+
+
+def fetch_market(ticker: str, http: httpx.Client | None = None, timeout: float | None = None) -> dict:
+    """Kalshi's record of one market, as sent."""
+    market = _get(f"/markets/{ticker}", http=http, timeout=timeout).get("market")
+    if not isinstance(market, dict) or market.get("ticker") != ticker:
+        raise VenueError("Kalshi's answer did not describe that market")
+    return market
+
+
+@dataclass(frozen=True)
+class Quote:
+    """What was on offer for one side of a market at one moment."""
+    open: bool                 # trading right now
+    open_time: dt.datetime
+    close_time: dt.datetime
+    ask: float | None          # the price to buy this side; None when nothing was offered
+    bid: float | None          # the best bid for this side; None when nobody was bidding
+    size: float                # contracts offered at the ask
+
+
+def quote(market: dict, side: str) -> Quote:
+    """One side of a market from Kalshi's record of it. A price of 0 or 1 is Kalshi's way of saying
+    nothing is on offer."""
+    if side not in ("yes", "no"):
+        raise VenueError(f"side must be yes or no, not {side!r}")
+    try:
+        if side == "yes":
+            ask, bid, size = market["yes_ask_dollars"], market["yes_bid_dollars"], market["yes_ask_size_fp"]
+        else:   # an offer to sell NO is a bid to buy YES, so the NO ask's size is the YES bid's
+            ask, bid, size = market["no_ask_dollars"], market["no_bid_dollars"], market["yes_bid_size_fp"]
+        status, opens, closes = market["status"], market["open_time"], market["close_time"]
+    except KeyError as e:
+        raise VenueError(f"Kalshi's market record has no {e.args[0]}") from e
+    ask, bid = _dollars(ask), _dollars(bid)
+    return Quote(open=status == "active", open_time=_time(opens), close_time=_time(closes),
+                 ask=ask if 0.0 < ask < 1.0 else None, bid=bid if 0.0 < bid < 1.0 else None, size=_count(size))
+
+
+def result(market: dict) -> str | None:
+    """'yes' or 'no' once Kalshi has finalised the market, None while it has not. A finalised market
+    with any other result cannot be scored and raises."""
+    if market.get("status") != "finalized":
+        return None
+    res = market.get("result")
+    if res not in ("yes", "no"):
+        raise VenueError(f"finalised with result {res!r}")
+    return res
+
+
+def _minute_end(at: dt.datetime) -> int:
+    """The end, in unix seconds, of the minute that holds this (naive UTC) moment."""
+    ts = at.replace(tzinfo=dt.timezone.utc).timestamp()
+    return (int(ts) // 60 + 1) * 60
+
+
+def fetch_minute(ticker: str, at: dt.datetime, http: httpx.Client | None = None) -> dict | None:
+    """Kalshi's one-minute record that holds the moment `at`: the highest and lowest bid and offer
+    seen in that minute. None when Kalshi has no record of that minute."""
+    parsed = parse_ticker(ticker)
+    if not parsed:
+        raise VenueError(f"not a market the room reads: {ticker!r}")
+    end = _minute_end(at)
+    params = {"start_ts": end - 60, "end_ts": end, "period_interval": 1}
+    body = _get(f"/series/{parsed[0]}/markets/{ticker}/candlesticks", params, http)
+    candles = body.get("candlesticks")
+    if not candles:   # Kalshi moves older markets to its historical store
+        try:
+            candles = _get(f"/historical/markets/{ticker}/candlesticks", params, http).get("candlesticks")
+        except NoSuchMarket:
+            candles = None
+    for c in candles or []:
+        if isinstance(c, dict) and c.get("end_period_ts") == end:
+            return c
+    return None
+
+
+def minute_range(candle: dict, side: str) -> tuple[float, float, float, float]:
+    """(lowest ask, highest ask, lowest bid, volume traded) for one side over one minute. NO is the
+    mirror of YES: buying NO costs 1 minus the YES bid."""
+    try:
+        yb_lo, yb_hi = _dollars(candle["yes_bid"]["low_dollars"]), _dollars(candle["yes_bid"]["high_dollars"])
+        ya_lo, ya_hi = _dollars(candle["yes_ask"]["low_dollars"]), _dollars(candle["yes_ask"]["high_dollars"])
+        volume = _count(candle["volume_fp"])
+    except (KeyError, TypeError) as e:
+        raise VenueError("Kalshi's minute record is missing a price") from e
+    if side == "yes":
+        return ya_lo, ya_hi, yb_lo, volume
+    if side == "no":
+        return round(1.0 - yb_hi, 6), round(1.0 - yb_lo, 6), round(1.0 - ya_hi, 6), volume
+    raise VenueError(f"side must be yes or no, not {side!r}")
+
+
+def open_market(series: str, now: dt.datetime, http: httpx.Client | None = None) -> dict | None:
+    """The market of this series that is trading at `now`, or None between windows."""
+    body = _get("/markets", {"series_ticker": series, "status": "open", "limit": 5}, http)
+    for m in body.get("markets") or []:
+        try:
+            if m.get("status") == "active" and _time(m["open_time"]) <= now < _time(m["close_time"]):
+                return m
+        except (KeyError, VenueError):
+            continue
+    return None
+
+
+# ---------- the fee rule is checked, not assumed ----------
+
+_series_ok: dict[str, float] = {}
+_series_lock = threading.Lock()
+
+
+def check_fee_rule(series: str, http: httpx.Client | None = None) -> None:
+    """Raise unless Kalshi still lists this series under the fee rule `fee` implements (its standard
+    quadratic fee, multiplier 1). A change there must stop fills, not quietly mis-price them. One good
+    look is trusted for an hour, and for a day if Kalshi cannot be reached to look again."""
+    now = time.monotonic()
+    with _series_lock:
+        seen = _series_ok.get(series)
+    if seen is not None and now - seen < SERIES_CHECK_SECONDS:
+        return
+    try:
+        s = _get(f"/series/{series}", http=http).get("series") or {}
+    except VenueError:
+        if seen is not None and now - seen < 24 * 3600:
+            return
+        raise
+    if s.get("fee_type") != "quadratic" or s.get("fee_multiplier") != 1:
+        with _series_lock:
+            _series_ok.pop(series, None)
+        raise VenueError(f"{series} fee rule changed: {s.get('fee_type')!r} x {s.get('fee_multiplier')!r}")
+    with _series_lock:
+        _series_ok[series] = now

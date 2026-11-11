@@ -1,0 +1,1 @@
+{"_note":"GET /series/KXBTC15M, read key-free 2026-11-11","series":{"category":"Crypto","fee_multiplier":1,"fee_type":"quadratic","frequency":"fifteen_min","last_updated_ts":"2026-10-29T18:50:05.14347Z","settlement_sources":[{"name":"CF Benchmarks","url":"https://www.cfbenchmarks.com/"}],"ticker":"KXBTC15M","title":"BTC 15 min"}}

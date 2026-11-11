@@ -11,9 +11,9 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import config, prices, scoring
+from . import config, kalshi, prices, scoring
 from .db import Agent, AuditEvent, CreditEntry, DailyLog, ReferencePrice, Read, Signal, utcnow
-from .sealing import leaf_hash, merkle_root, new_salt, seal, signal_hash, unseal
+from .sealing import leaf_hash, merkle_root, new_salt, priced_hash, priced_leaf, seal, signal_hash, unseal
 
 log = logging.getLogger("signal_room.service")
 
@@ -46,19 +46,8 @@ def grant_starter(db: Session, agent: Agent) -> None:
 
 # ---------- signals ----------
 
-def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction: str, confidence: float) -> Signal:
-    # Delisted agents may still post: that is the only road back. Retired wallets are done.
-    if agent.status == "retired":
-        raise HTTPException(403, "wallet retired")
-    if pair not in config.PAIRS:
-        raise HTTPException(422, f"pair must be one of {list(config.PAIRS)}")
-    if horizon not in config.HORIZONS:
-        raise HTTPException(422, f"horizon must be one of {list(config.HORIZONS)}")
-    if direction not in ("long", "short"):
-        raise HTTPException(422, "direction must be long or short")
-    if not (config.MIN_CONFIDENCE <= confidence <= config.MAX_CONFIDENCE):
-        raise HTTPException(422, f"confidence must be between {config.MIN_CONFIDENCE} and {config.MAX_CONFIDENCE}")
-
+def _may_post(db: Session, agent: Agent, pair: str, horizon: str) -> None:
+    """The two rules every call faces, plain or priced."""
     open_exists = db.query(Signal).filter_by(agent_id=agent.id, pair=pair, horizon=horizon, resolved_at=None).first()
     if open_exists:
         raise HTTPException(409, "one open signal per pair per horizon")
@@ -72,6 +61,22 @@ def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction:
                  .order_by(Signal.resolve_at.desc()).first())
     if read_open:
         raise HTTPException(409, f"you read an open {pair} call; you may post on {pair} after it closes at {read_open.resolve_at.isoformat()}Z")
+
+
+def submit_signal(db: Session, agent: Agent, pair: str, horizon: str, direction: str, confidence: float) -> Signal:
+    # Delisted agents may still post: that is the only road back. Retired wallets are done.
+    if agent.status == "retired":
+        raise HTTPException(403, "wallet retired")
+    if pair not in config.PAIRS:
+        raise HTTPException(422, f"pair must be one of {list(config.PAIRS)}")
+    if horizon not in config.HORIZONS:
+        raise HTTPException(422, f"horizon must be one of {list(config.HORIZONS)}")
+    if direction not in ("long", "short"):
+        raise HTTPException(422, "direction must be long or short")
+    if not (config.MIN_CONFIDENCE <= confidence <= config.MAX_CONFIDENCE):
+        raise HTTPException(422, f"confidence must be between {config.MIN_CONFIDENCE} and {config.MAX_CONFIDENCE}")
+
+    _may_post(db, agent, pair, horizon)
 
     # The sampler must be alive: the start price will be its next sample.
     if prices.latest(db, pair, config.PRICE_MAX_AGE_SECONDS) is None:
@@ -108,7 +113,8 @@ def fill_start_prices(db: Session, now: dt.datetime | None = None) -> int:
     after the post was fetched after it. Returns how many were filled."""
     now = now or utcnow()
     filled = 0
-    for sig in db.query(Signal).filter(Signal.price_at_submit.is_(None), Signal.resolved_at.is_(None)).all():
+    for sig in db.query(Signal).filter(Signal.kind.is_(None), Signal.price_at_submit.is_(None),
+                                       Signal.resolved_at.is_(None)).all():
         ref = (db.query(ReferencePrice).filter(ReferencePrice.pair == sig.pair, ReferencePrice.sampled_at >= sig.submitted_at)
                .order_by(ReferencePrice.sampled_at).first())
         if ref is None:
@@ -128,7 +134,8 @@ def resolve_due(db: Session, now: dt.datetime | None = None) -> int:
     """Resolve every signal whose horizon has passed. Returns how many were resolved."""
     now = now or utcnow()
     fill_start_prices(db, now)
-    due = db.query(Signal).filter(Signal.resolved_at.is_(None), Signal.resolve_at <= now).all()
+    fill_waiting(db, now)
+    due = db.query(Signal).filter(Signal.kind.is_(None), Signal.resolved_at.is_(None), Signal.resolve_at <= now).all()
     count = 0
     touched: set[str] = set()
     for sig in due:
@@ -147,9 +154,11 @@ def resolve_due(db: Session, now: dt.datetime | None = None) -> int:
                 count += 1
             except Exception:
                 db.rollback()
+    priced, agents = settle_priced(db, now)
+    touched |= agents
     if touched:
         update_standing(db, touched, now)
-    return count
+    return count + priced
 
 
 def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
@@ -222,6 +231,239 @@ def _resolve_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
     return True
 
 
+# ---------- priced calls (rule set 4) ----------
+#
+# A priced call is one side of a venue market, with the most the agent would pay. The room reads the
+# price itself the moment the call lands, fills the call only if a small real order could have been,
+# and scores it against what it cost (price + fee) using the venue's own result. The room witnesses;
+# it never places an order and never touches money.
+
+def decide_fill(ask: float | None, size: float, limit: float, seconds_left: float) -> tuple[str, str]:
+    """('filled', '') or ('unfilled', why). Decided from the price alone, before any result exists."""
+    if ask is None:
+        return "unfilled", "nothing on offer"
+    if seconds_left < config.PRICED_MIN_SECONDS_LEFT:
+        return "unfilled", "under a minute left"
+    if not (config.PRICED_MIN_PRICE <= ask <= config.PRICED_MAX_PRICE):
+        return "unfilled", "price outside 5c-95c"
+    if ask > limit + 1e-9:
+        return "unfilled", "price above the limit"
+    if size < config.PRICED_MIN_SIZE:
+        return "unfilled", "under 10 on offer"
+    return "filled", ""
+
+
+def fill_record(sig: Signal) -> dict:
+    """What the room saw at the venue for this call, exactly as the day's leaf commits to it."""
+    return {"fill": sig.fill, "reason": sig.fill_reason or "", "at": sig.fill_at.isoformat() if sig.fill_at else None,
+            "ask": sig.fill_ask, "bid": sig.fill_bid, "size": sig.fill_size, "source": sig.fill_source,
+            "bar": sig.bar, "fade_bar": sig.fade_bar}
+
+
+def _set_fill(sig: Signal, salt: str, status: str, reason: str, at: dt.datetime, ask: float | None,
+              bid: float | None, size: float, source: str, closes: dt.datetime) -> None:
+    sig.fill, sig.fill_reason, sig.fill_at, sig.fill_source = status, reason or None, at, source
+    sig.fill_ask, sig.fill_bid, sig.fill_size = ask, bid, size
+    sig.resolve_at = closes                       # a priced call closes when its market does
+    if status == "filled":
+        sig.bar, sig.fade_bar = kalshi.cost(ask), kalshi.fade_bar(bid)
+        sig.start_at = at                         # its scored window: from the fill to the market's close
+    sig.leaf = priced_leaf(sig.hash, salt, fill_record(sig))
+
+
+def submit_priced(db: Session, agent: Agent, venue: str, market: str, side: str, limit: float,
+                  confidence: float | None) -> Signal:
+    if agent.status == "retired":
+        raise HTTPException(403, "wallet retired")
+    if venue != kalshi.VENUE:
+        raise HTTPException(422, f"venue must be {kalshi.VENUE}")
+    parsed = kalshi.parse_ticker(market)
+    if not parsed:
+        raise HTTPException(422, f"market must be one of Kalshi's 15-minute markets on {list(config.PAIRS)}, e.g. KXBTC15M-...")
+    series, pair, horizon = parsed
+    if side not in ("yes", "no"):
+        raise HTTPException(422, "side must be yes or no")
+    if not (0.0 < limit < 1.0):
+        raise HTTPException(422, "limit is the most you would pay per contract, in dollars: between 0 and 1")
+    if confidence is not None and not (limit <= confidence <= config.MAX_CONFIDENCE):
+        raise HTTPException(422, "confidence must be at least the limit (nobody buys what they think is overpriced), "
+                                 f"at most {config.MAX_CONFIDENCE}; omit it to claim nothing beyond the price")
+
+    # The agent's call on the last window may be waiting only for this minute's tick; settle it now so
+    # one-open-call-per-coin never delays the next call (a delay would change the price it gets).
+    settle_priced(db, utcnow(), agent_id=agent.id, pair=pair)
+    _may_post(db, agent, pair, horizon)
+
+    # The stamp comes first, then the look: the price is one the room read after the call landed.
+    now = utcnow()
+    quote, read_at = None, None
+    try:
+        kalshi.check_fee_rule(series)
+        quote = kalshi.quote(kalshi.fetch_market(market), side)
+        read_at = max(utcnow(), now)
+    except kalshi.NoSuchMarket:
+        raise HTTPException(422, "Kalshi has no such market")
+    except kalshi.VenueError as e:
+        log.warning("priced call on %s: live read failed (%s); the fill will come from that minute's history", market, e)
+    if quote is not None and not (quote.open and quote.open_time <= now < quote.close_time):
+        raise HTTPException(422, "that market is not open")
+
+    salt = new_salt()
+    sig = Signal(
+        agent_id=agent.id, pair=pair, horizon=horizon, kind="priced", venue=venue, market=market,
+        body_cipher=seal(agent.id, {"side": side, "limit": limit, "confidence": confidence, "salt": salt}),
+        hash=priced_hash(agent.id, venue, market, side, limit, confidence, now.isoformat(), salt),
+        submitted_at=now, hash_version=4,
+        resolve_at=quote.close_time if quote else now + dt.timedelta(seconds=config.HORIZONS[horizon]),   # provisional if unread
+    )
+    if quote is not None:
+        status, why = decide_fill(quote.ask, quote.size, limit, (quote.close_time - read_at).total_seconds())
+        _set_fill(sig, salt, status, why, read_at, quote.ask, quote.bid, quote.size, "live", quote.close_time)
+    db.add(sig)
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if "ux_signal_one_open" in str(e.orig) or "UNIQUE" in str(e.orig).upper():
+            raise HTTPException(409, "one open signal per pair per horizon")
+        log.error("priced signal insert failed: %s", e.orig)
+        raise HTTPException(500, "the room could not store the signal; see the server log")
+    # No side and no price here: either would give an open call away.
+    event("priced", agent=agent.name or agent.id, pair=pair, horizon=horizon, market=market, signal_id=sig.id,
+          fill=sig.fill or "waiting", closes=sig.resolve_at.isoformat())
+    return sig
+
+
+def fill_from_history(db: Session, sig: Signal, now: dt.datetime) -> bool:
+    """For a priced call the room could not read live: decide its fill from the venue's record of that
+    minute, at the worst price the side was offered at in it. Returns True once the fill is decided."""
+    if now < sig.submitted_at.replace(second=0, microsecond=0) + dt.timedelta(seconds=70):
+        return False                               # that minute's record is not complete yet
+    body = unseal(sig.agent_id, sig.body_cipher)
+    try:
+        kalshi.check_fee_rule(kalshi.parse_ticker(sig.market)[0])
+        quote = kalshi.quote(kalshi.fetch_market(sig.market), body["side"])
+        minute = kalshi.fetch_minute(sig.market, sig.submitted_at)
+        if minute is None:
+            return False
+        _, ask_high, bid_low, volume = kalshi.minute_range(minute, body["side"])
+    except kalshi.NoSuchMarket:
+        # Posted while Kalshi could not be read, on a market that turns out not to exist.
+        _set_fill(sig, body["salt"], "unfilled", "no such market", sig.submitted_at, None, None, 0.0, "history", sig.resolve_at)
+        db.commit()
+        return True
+    except kalshi.VenueError as e:
+        log.info("priced call %s: history not readable yet (%s)", sig.id, e)
+        return False
+    ask = ask_high if 0.0 < ask_high < 1.0 else None
+    bid = bid_low if 0.0 < bid_low < 1.0 else None
+    if not (quote.open_time <= sig.submitted_at < quote.close_time):
+        status, why = "unfilled", "market was not open"
+    else:
+        status, why = decide_fill(ask, volume, float(body["limit"]), (quote.close_time - sig.submitted_at).total_seconds())
+    _set_fill(sig, body["salt"], status, why, sig.submitted_at, ask, bid, volume, "history", quote.close_time)
+    db.commit()
+    event("priced", agent=_name(db, sig.agent_id), pair=sig.pair, horizon=sig.horizon, market=sig.market,
+          signal_id=sig.id, fill=sig.fill, closes=sig.resolve_at.isoformat())
+    return True
+
+
+def fill_waiting(db: Session, now: dt.datetime | None = None) -> int:
+    """Decide, from history, every priced call still waiting for a fill. Returns how many were decided."""
+    now = now or utcnow()
+    done = 0
+    for sig in db.query(Signal).filter(Signal.kind == "priced", Signal.fill.is_(None), Signal.resolved_at.is_(None)).all():
+        try:
+            done += fill_from_history(db, sig, now)
+        except Exception as e:   # one bad row must not stop the rest
+            db.rollback()
+            log.exception("fill from history failed for %s: %s", sig.id, e)
+    return done
+
+
+def settle_priced(db: Session, now: dt.datetime | None = None, agent_id: str | None = None,
+                  pair: str | None = None) -> tuple[int, set[str]]:
+    """Score every priced call whose market has closed. Returns (how many closed, the agents touched)."""
+    now = now or utcnow()
+    q = db.query(Signal).filter(Signal.kind == "priced", Signal.resolved_at.is_(None), Signal.resolve_at <= now)
+    if agent_id:
+        q = q.filter(Signal.agent_id == agent_id)
+    if pair:
+        q = q.filter(Signal.pair == pair)
+    count, touched = 0, set()
+    for sig in q.all():
+        try:
+            if _settle_one(db, sig, now):
+                count += 1
+                touched.add(sig.agent_id)
+        except Exception as e:   # never void a real call over a passing error: leave it for the next tick
+            db.rollback()
+            log.exception("settle failed for priced signal %s: %s", sig.id, e)
+    return count, touched
+
+
+def _settle_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
+    """Close one priced call whose market has closed. False while it cannot be closed yet."""
+    give_up = (now - sig.submitted_at).total_seconds() / 3600 > config.BACKFILL_WINDOW_HOURS
+    if sig.fill is None:
+        if not fill_from_history(db, sig, now) and not give_up:
+            return False
+        if sig.fill is not None and sig.resolve_at > now:
+            return False                           # the market's real close is later than the provisional one
+    body = unseal(sig.agent_id, sig.body_cipher)
+    side, stated = body["side"], body.get("confidence")
+
+    def close(result: str, note: str = "", **fields) -> bool:
+        # Nothing about the call is written to its row until it really closes: the side stays sealed.
+        sig.result, sig.resolved_at = result, (now if result == "void" else sig.resolve_at)
+        sig.side, sig.limit_price = side, float(body["limit"])
+        sig.direction = "long" if side == "yes" else "short"   # these markets ask "will it finish higher?"
+        if sig.confidence is None:
+            sig.confidence = stated
+        if sig.credit is None:
+            sig.credit = 0.0
+        if result == "void":
+            db.add(AuditEvent(agent_id=sig.agent_id, event="signal_void", detail=f"{sig.id} {note}"))
+        db.commit()
+        # Closed, so public record: the side may be shown now.
+        event("scored", agent=_name(db, sig.agent_id), pair=sig.pair, horizon=sig.horizon, priced=True,
+              market=sig.market, side=side, result=result, **fields)
+        return True
+
+    if sig.fill is None:
+        return close("void", "no price could be established")
+    if sig.fill == "unfilled":
+        return close("unfilled", reason=sig.fill_reason)
+    try:
+        outcome = kalshi.result(kalshi.fetch_market(sig.market))
+    except kalshi.VenueError as e:
+        log.info("priced call %s: result not readable yet (%s)", sig.id, e)
+        outcome = None
+    if outcome is None:
+        if (now - sig.resolve_at).total_seconds() / 3600 <= config.BACKFILL_WINDOW_HOURS:
+            return False                           # not finalised yet; try again next tick
+        return close("void", "the venue gave no result")
+    y = 1.0 if outcome == side else 0.0
+    confidence = float(stated) if stated is not None else sig.bar   # no stated chance: it claimed the price, no more
+    result = "right" if y else "wrong"
+    bs = scoring.brier(confidence, y)
+    sig.confidence, sig.venue_result = confidence, outcome
+    sig.brier = round(bs, 6)
+    sig.credit = round(scoring.credit_for(bs, result, sig.bar), 4)
+    sig.net_return = round(y - sig.bar, 6)         # profit per contract, in dollars
+    sig.scoring_version = scoring.SCORING_VERSION
+    if sig.credit != 0:
+        db.add(CreditEntry(agent_id=sig.agent_id, amount=sig.credit, reason="resolved", signal_id=sig.id))
+    return close(result, confidence=confidence, bar=sig.bar, venue_result=outcome, credit=sig.credit,
+                 opened=sig.fill_at.isoformat(), closed=sig.resolve_at.isoformat())
+
+
+def _briers_and_refs(rows: list[Signal]) -> tuple[list[float], list[float]]:
+    """Each right/wrong call's Brier and the Brier of saying exactly what its bar said."""
+    return ([s.brier for s in rows],
+            [scoring.ref_brier(s.bar if s.bar is not None else scoring.EVEN_BAR, 1.0 if s.result == "right" else 0.0) for s in rows])
+
+
 def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = None) -> None:
     """After resolutions: delist active agents that have gone bad, reinstate delisted ones that recovered,
     retire wallets delisted three times in a year."""
@@ -236,7 +478,7 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
             if agent.delisted_at:
                 q = q.filter(Signal.resolved_at > agent.delisted_at)
             recent = q.order_by(Signal.resolved_at.desc()).limit(config.DELIST_WINDOW).all()
-            if scoring.should_delist([s.brier for s in reversed(recent)]):
+            if scoring.should_delist(*_briers_and_refs(list(reversed(recent)))):
                 agent.delist_count = delists_last_year(db, aid, now) + 1
                 # As of the horizon of the signal that tipped it, so "fresh" means resolved after that signal.
                 agent.delisted_at = max(s.resolved_at for s in recent)
@@ -250,7 +492,7 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
                 Signal.agent_id == aid, Signal.result.in_(("right", "wrong")),
                 Signal.resolved_at > agent.delisted_at,
             ).order_by(Signal.resolved_at).all()
-            if len(fresh) >= config.REINSTATE_MIN_RESOLVED and scoring.skill_score([s.brier for s in fresh]) > 0:
+            if len(fresh) >= config.REINSTATE_MIN_RESOLVED and scoring.skill_score(*_briers_and_refs(fresh)) > 0:
                 agent.status = "active"
                 db.add(AuditEvent(agent_id=aid, event="reinstated", detail=f"n={len(fresh)}", created_at=now))
                 event("reinstated", agent=agent.name or aid)
@@ -281,12 +523,17 @@ def board_size(db: Session, since: dt.datetime | None) -> int:
 
 def _record(rows: list[Signal], slices: int = 1, now: dt.datetime | None = None, competitors: int = 1) -> dict:
     clusters = scoring.cluster_ids([(s.start_at or s.submitted_at, s.resolve_at) for s in rows])
+    plain = [s for s in rows if s.kind is None]
     long_returns = [(s.price_at_resolve - s.price_at_submit) / s.price_at_submit - config.ROUND_TRIP_COST
-                    for s in rows if s.net_return is not None and s.price_at_resolve and s.price_at_submit]
+                    for s in plain if s.net_return is not None and s.price_at_resolve and s.price_at_submit]
+    # A plain call's bar is an even bet (None). A priced call's is what it cost.
     rec = scoring.record([s.brier for s in rows], [s.result for s in rows],
-                         [s.net_return for s in rows if s.net_return is not None], clusters, slices, long_returns,
-                         competitors)
+                         [s.net_return for s in plain if s.net_return is not None], clusters, slices, long_returns,
+                         competitors, [s.bar for s in rows], [s.fade_bar for s in rows])
     out = rec.__dict__.copy()
+    # Priced calls are bought, not traded 1:1: what they made is profit per contract, not a compounded return.
+    bought = [s.net_return for s in rows if s.kind == "priced" and s.result in ("right", "wrong")]
+    out["profit_per_contract"] = round(sum(bought) / len(bought), 4) if bought else None
     # Tries per day so far turns the projected tries into days.
     out["days_to_next"] = None
     if rec.tries_to_next is not None and rows:
@@ -364,6 +611,7 @@ def room_listing(db: Session, pair: str | None, horizon: str | None, limit: int 
             "signal_id": s.id, "agent_id": s.agent_id, "agent_name": a.name if a else "",
             "pair": s.pair, "horizon": s.horizon, "submitted_at": s.submitted_at.isoformat(),
             "resolve_at": s.resolve_at.isoformat(), "hash": s.hash,
+            "kind": s.kind or "plain", "venue": s.venue, "market": s.market,   # never the side, the limit or the fill
             "agent_score": rec["score"], "agent_ranked": rec["ranked"], "agent_n": rec["n"],
             "agent_verdict": rec["verdict"], "read_cost": read_cost(rec["verdict"]),
         })
@@ -435,7 +683,17 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
         # Once a call has closed it is public record, so its salt is too: with it anyone can recompute
         # the call's hash and prove its direction and confidence were not changed after the fact.
         "salt": body.get("salt") if sig.resolved_at is not None else None,
+        **_priced_view(sig, body),
     }
+
+
+def _priced_view(sig: Signal, body: dict) -> dict:
+    """The priced part of a call, for someone entitled to its body (its author, or a reader who paid)."""
+    if sig.kind != "priced":
+        return {"kind": "plain"}
+    return {"kind": "priced", "venue": sig.venue, "market": sig.market, "side": body.get("side"),
+            "limit": body.get("limit"), "stated": body.get("confidence"), "fill": fill_record(sig) if sig.fill else None,
+            "venue_result": sig.venue_result, "leaf": sig.leaf}
 
 
 def my_signals(db: Session, agent: Agent, limit: int = 200) -> list[dict]:
@@ -450,6 +708,7 @@ def my_signals(db: Session, agent: Agent, limit: int = 200) -> list[dict]:
             "start_at": s.start_at.isoformat() if s.start_at else None, "hash": s.hash, "hash_version": s.hash_version,
             "result": s.result, "price_at_resolve": s.price_at_resolve, "brier": s.brier,
             "net_return": s.net_return, "credit": s.credit, "scoring_version": s.scoring_version,
+            **_priced_view(s, body),
         })
     return out
 
@@ -457,7 +716,10 @@ def my_signals(db: Session, agent: Agent, limit: int = 200) -> list[dict]:
 # ---------- daily log ----------
 
 def leaf(s: Signal) -> str:
-    """The day's root commits to this per call: the receipt hash, plus the start the room gave it."""
+    """The day's root commits to this per call: the receipt hash, plus the start the room gave it (a
+    plain call) or what the room saw at the venue (a priced call, stored once its fill is decided)."""
+    if s.kind == "priced":
+        return s.leaf or s.hash
     return leaf_hash(s.hash, s.start_at.isoformat(), s.price_at_submit) if s.start_at else s.hash
 
 
@@ -468,8 +730,10 @@ def day_rows(db: Session, day: dt.date) -> list[Signal]:
 
 
 def day_ready_to_anchor(db: Session, day: dt.date) -> bool:
-    """A day's root is final once every call posted that day has its start price (or is void)."""
-    return not any(s.price_at_submit is None and s.resolved_at is None for s in day_rows(db, day))
+    """A day's root is final once every call posted that day has its start price, or for a priced call
+    its fill decided (or is void)."""
+    return not any((s.fill is None if s.kind == "priced" else s.price_at_submit is None) and s.resolved_at is None
+                   for s in day_rows(db, day))
 
 
 def build_daily_log(db: Session, day: dt.date) -> DailyLog:
@@ -498,6 +762,7 @@ def daily_log_view(db: Session, day: dt.date) -> dict:
         "signals": [{"signal_id": s.id, "agent_id": s.agent_id, "pair": s.pair, "horizon": s.horizon,
                      "submitted_at": s.submitted_at.isoformat(), "resolve_at": s.resolve_at.isoformat(),
                      "resolved": s.resolved_at is not None, "hash": s.hash, "leaf": leaf(s), "hash_version": s.hash_version,
-                     "start_at": s.start_at.isoformat() if s.start_at else None, "price_at_submit": s.price_at_submit}
+                     "start_at": s.start_at.isoformat() if s.start_at and s.kind is None else None,
+                     "price_at_submit": s.price_at_submit, "kind": s.kind or "plain", "market": s.market}
                     for s in rows],
     }

@@ -51,6 +51,25 @@ def leaf_hash(signal_hash_hex: str, start_at_iso: str, price_at_submit: float) -
     return sha256_hex(canonical({"hash": signal_hash_hex, "start_at": start_at_iso, "price_at_submit": price_at_submit}))
 
 
+def priced_hash(agent_id: str, venue: str, market: str, side: str, limit: float, confidence: float | None,
+                submitted_at_iso: str, salt: str) -> str:
+    """Commitment to a priced call (hash format 4): the market, the side, the most the agent would pay
+    and its stated chance (None: it claims nothing beyond the price), plus the server stamp and salt."""
+    return sha256_hex(canonical({
+        "agent": agent_id, "kind": "priced", "venue": venue, "market": market, "side": side,
+        "limit": round(limit, 4), "confidence": None if confidence is None else round(confidence, 4),
+        "submitted_at": submitted_at_iso, "salt": salt,
+    }))
+
+
+def priced_leaf(signal_hash_hex: str, salt: str, fill: dict) -> str:
+    """What the daily root commits to for a priced call once its fill is decided: the receipt hash plus
+    what the room saw at the venue (fill, reason, at, ask, bid, size, source, bar, fade_bar). The salt is
+    part of it because the price seen depends on the side: without the salt, anyone could try both sides
+    against the public price and read the side of an open call off its leaf."""
+    return sha256_hex(canonical({"hash": signal_hash_hex, "salt": salt, "fill": fill}))
+
+
 def _agent_fernet(agent_id: str) -> Fernet:
     if not config.MASTER_KEY:
         raise RuntimeError("SIGNAL_ROOM_MASTER_KEY is not set")
