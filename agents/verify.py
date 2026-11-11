@@ -14,6 +14,11 @@ can see, so it trusts nothing the room says:
 If someone changed a call or its start price after the fact, link 1 breaks. If calls were added or
 removed, link 2 breaks. If the published record was rewritten after anchoring, link 3 breaks.
 
+A priced call (one side of a Kalshi market, judged against what it cost) gets a fourth check that
+does not go through the room at all: Kalshi's own public record must show the result the room scored
+it by, and the price the room says it saw must sit inside the range Kalshi's minute-by-minute history
+shows for that side in that minute. If Kalshi cannot be reached, that check is reported as skipped.
+
 Calls still open are skipped (reading them would cost credits); a day is only fully checkable once
 every call in it has closed. Reading a closed call is free. Requests are paced under the room's rate
 limit, so a full day takes a few minutes; `--sample N` checks N random calls instead of all.
@@ -66,8 +71,70 @@ def leaf_hash(call_hash_hex: str, start_at_iso: str, price_at_submit: float) -> 
                                       "price_at_submit": price_at_submit})).hexdigest()
 
 
+def priced_hash(agent_id: str, venue: str, market: str, side: str, limit: float, stated: float | None,
+                submitted_at_iso: str, salt: str) -> str:
+    """A priced call's hash (format 4): the market, the side, the most the agent would pay and its
+    stated chance (None: it claimed nothing beyond the price), the server stamp and the salt."""
+    return hashlib.sha256(_canonical({
+        "agent": agent_id, "kind": "priced", "venue": venue, "market": market, "side": side,
+        "limit": round(limit, 4), "confidence": None if stated is None else round(stated, 4),
+        "submitted_at": submitted_at_iso, "salt": salt})).hexdigest()
+
+
+def priced_leaf(call_hash_hex: str, salt: str, fill: dict) -> str:
+    """What the day's root commits to for a priced call: receipt hash + salt + what the room saw at the venue."""
+    return hashlib.sha256(_canonical({"hash": call_hash_hex, "salt": salt, "fill": fill})).hexdigest()
+
+
 def leaf_of(item: dict) -> str:
+    if item.get("kind") == "priced":
+        # A priced call's leaf holds its salt, which stays sealed until the call closes, so the published
+        # leaf is used here; link 1 recomputes it for every closed call from what the call revealed.
+        return item.get("leaf") or item["hash"]
     return leaf_hash(item["hash"], item["start_at"], item["price_at_submit"]) if item.get("start_at") else item["hash"]
+
+
+# ---------- the venue's own public record ----------
+
+class KalshiPublic:
+    """Kalshi's public market data, read directly. Nothing here passes through the room's server."""
+
+    def market(self, ticker: str) -> dict:
+        from signal_room import kalshi
+        return kalshi.fetch_market(ticker)
+
+    def minute(self, ticker: str, at: dt.datetime) -> dict | None:
+        from signal_room import kalshi
+        return kalshi.fetch_minute(ticker, at)
+
+
+def check_against_venue(body: dict, venue) -> str | None:
+    """None if Kalshi's public record agrees with what the room recorded for this closed priced call,
+    else what disagrees. Raises if Kalshi cannot be read."""
+    from signal_room import kalshi
+    fill = body.get("fill") or {}
+    if fill.get("fill") != "filled" or body.get("result") not in ("right", "wrong"):
+        return None                                   # never scored: nothing of consequence to re-check
+    result = kalshi.result(venue.market(body["market"]))
+    if result != body.get("venue_result"):
+        return f"Kalshi's result is {result!r}, the room scored it as {body.get('venue_result')!r}"
+    if (body["result"] == "right") != (result == body["side"]):
+        return f"scored {body['result']} for {body['side']} though Kalshi's result is {result}"
+    at = dt.datetime.fromisoformat(fill["at"])
+    seen = []
+    for moment in (at, at - dt.timedelta(seconds=5), at + dt.timedelta(seconds=5)):   # a read can straddle a minute
+        candle = venue.minute(body["market"], moment)
+        if candle is None:
+            continue
+        low, high, _, _ = kalshi.minute_range(candle, body["side"])
+        seen.append((low, high))
+        if fill["source"] == "history" and abs(fill["ask"] - high) < 1e-6:
+            return None                               # scored at the worst price of the minute, as the rule says
+        if fill["source"] == "live" and low - 1e-6 <= fill["ask"] <= high + 1e-6:
+            return None
+    if not seen:
+        return "Kalshi has no record of that minute"
+    return f"the room says the price was {fill['ask']}, Kalshi's record of that minute shows {seen[0][0]} to {seen[0][1]}"
 
 
 def merkle_root(hashes: list[str]) -> str:
@@ -122,13 +189,16 @@ def is_open(item: dict, now: dt.datetime) -> bool:
 
 def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, pause: float = 1.1,
                progress=lambda done, total: None, now: dt.datetime | None = None,
-               anchor_wallet: str | None = ANCHOR_WALLET) -> dict:
-    """Run all three checks for one closed day. `client` needs log(day) and read(signal_id)."""
+               anchor_wallet: str | None = ANCHOR_WALLET, venue=None) -> dict:
+    """Run every check for one closed day. `client` needs log(day) and read(signal_id); `venue` needs
+    market(ticker) and minute(ticker, at) and defaults to Kalshi's public data."""
+    venue = venue or KalshiPublic()
     now = now or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     log = client.log(day)
     listed = log["signals"]
     out = {"day": day, "calls": len(listed), "anchored_tx": log.get("anchored_tx"),
-           "checked": 0, "matched": 0, "mismatched": [], "still_open": 0}
+           "checked": 0, "matched": 0, "mismatched": [], "still_open": 0,
+           "venue_checked": 0, "venue_mismatched": [], "venue_unreachable": 0}
 
     # Link 1: each call's hash and leaf from what it revealed. Open calls are skipped, never read:
     # reading an open call costs credits and the verifier is not here to buy anything.
@@ -140,9 +210,21 @@ def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, 
         if body.get("result") is None:
             out["still_open"] += 1
         else:
-            h = call_hash(body["agent_id"], body["pair"], body["horizon"], body["direction"], float(body["confidence"]),
-                          body["submitted_at"], body["price_at_submit"], body.get("salt"), body.get("hash_version"))
-            lf = leaf_hash(h, body["start_at"], body["price_at_submit"]) if body.get("start_at") else h
+            if body.get("kind") == "priced":
+                h = priced_hash(body["agent_id"], body["venue"], body["market"], body["side"], float(body["limit"]),
+                                body.get("stated"), body["submitted_at"], body["salt"])
+                lf = priced_leaf(h, body["salt"], body["fill"]) if body.get("fill") else h
+                try:
+                    wrong = check_against_venue(body, venue)
+                    out["venue_checked"] += 1
+                    if wrong:
+                        out["venue_mismatched"].append(f"{item['signal_id']}: {wrong}")
+                except Exception:
+                    out["venue_unreachable"] += 1
+            else:
+                h = call_hash(body["agent_id"], body["pair"], body["horizon"], body["direction"], float(body["confidence"]),
+                              body["submitted_at"], body["price_at_submit"], body.get("salt"), body.get("hash_version"))
+                lf = leaf_hash(h, body["start_at"], body["price_at_submit"]) if body.get("start_at") else h
             out["checked"] += 1
             if h == item["hash"] == body["hash"] and lf == item.get("leaf", item["hash"]):
                 out["matched"] += 1
@@ -170,7 +252,7 @@ def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, 
         late = (at - day_end).total_seconds() / 3600
         out["anchor_late_hours"] = round(late, 1) if late > LATE_ANCHOR_HOURS else 0
     out["ok"] = ((not out["mismatched"]) and out["root_matches_anchor"] and out["chain_matches"]
-                 and out["sender_matches"] and out["still_open"] == 0)
+                 and out["sender_matches"] and out["still_open"] == 0 and not out["venue_mismatched"])
     return out
 
 
@@ -181,6 +263,13 @@ def report(r: dict) -> str:
         lines.append(f"  ✘ calls: {len(r['mismatched'])} of {r['checked']} do NOT match their published fingerprint: {', '.join(r['mismatched'][:5])}")
     else:
         lines.append(f"  ✔ calls: all {r['checked']} checked match their published fingerprint{open_note}")
+    if r.get("venue_mismatched"):
+        lines.append(f"  ✘ Kalshi: {len(r['venue_mismatched'])} priced calls do NOT match Kalshi's own public record: "
+                     + "; ".join(r["venue_mismatched"][:3]))
+    elif r.get("venue_checked"):
+        lines.append(f"  ✔ Kalshi: all {r['venue_checked']} priced calls match Kalshi's own record (result, and the price seen that minute)")
+    if r.get("venue_unreachable"):
+        lines.append(f"  – Kalshi: could not be reached for {r['venue_unreachable']} priced calls; their fills and results were not re-checked")
     lines.append(f"  {'✔' if r['root_matches_anchor'] else '✘'} day: fingerprint rebuilt from every call "
                  f"{'matches' if r['root_matches_anchor'] else 'does NOT match'} the anchored one ({r['root'][:12]}…)")
     c = r["chain"]

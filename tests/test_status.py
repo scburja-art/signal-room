@@ -36,3 +36,21 @@ def test_status_warns_when_sampler_is_down(session_factory):
     text = status.report(session_factory())
     assert "nobody ranked yet" in text
     assert "price sampler is not running" in text
+
+
+def test_a_priced_record_is_read_against_what_it_cost(client, session_factory):
+    from tests.test_priced import T0, rows_for
+    from signal_room.db import Agent as AgentRow, Signal
+    a = ApiAgent(client, "kakalshi-crypto-first-minute-priced")
+    rows_for(session_factory, a.id, 75, 15, bar=0.70, stated=0.80)      # wins 83% at a 70c cost
+    s = session_factory()
+    s.add(Signal(agent_id=a.id, pair="BTC", horizon="15m", kind="priced", venue="kalshi", market="KXBTC15M-X-00", body_cipher="-",
+                 hash="f" * 64, hash_version=4, submitted_at=T0, resolve_at=T0, resolved_at=T0, fill="unfilled", result="unfilled", credit=0.0))
+    s.commit()
+    text = "\n".join(status.agent_lines(s, s.get(AgentRow, a.id), T0))
+    assert "right 83% against a bar of 70% (edge +13, range " in text
+    assert "a bot with no edge over its prices does this well about 1 in " in text and "coin-flipper" not in text
+    assert "scored 90, flat 0, open 0, voided 0, not filled 1, credits" in text
+    assert "priced calls: 90 bought at the price the room read; average profit +13.3¢ a contract after fees" in text
+    assert "traded 1:1" not in text                                     # nothing here was a 1:1 trade
+    s.close()

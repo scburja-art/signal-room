@@ -121,7 +121,7 @@ def test_scoreboard_draws_from_the_database(client, session_factory, monkeypatch
     lines = feed.scoreboard(color=False)
     header = next(line for line in lines if "Verdict" in line)
     row = next(line for line in lines if "Momentum" in line)
-    assert header.split() == ["Bot", "Verdict", "Right", "vs.", "coin", "flip", "Calls", "Next", "step"]
+    assert header.split() == ["Bot", "Verdict", "Right", "vs.", "its", "bar", "Calls", "Next", "step"]
     # 3 of 3 right at 60%: skill = 1 - 0.16/0.25 = +0.36 → 36 points better; unproven, so no next step.
     assert row.split() == ["Momentum", "Unproven", "100%", "▲", "36", "better", "3", "—"]
     assert header.index("Calls") + len("Calls") == row.index("3 ") + 1      # numbers right-align under their header
@@ -162,3 +162,57 @@ def test_free_reads_of_closed_calls_are_not_paid_reads(client, session_factory, 
     verifier = Agent(client, "verifier")
     assert verifier.get(f"/room/{sig_id}").status_code == 200      # closed call: free
     assert not any("verifier" in line for line in feed.scoreboard(color=False))
+
+
+# ---------- priced calls ----------
+
+def priced(fill, **e):
+    return ev(kind="priced", agent="kakalshi-crypto-first-minute-priced", pair="XRP", horizon="15m",
+              market="KXXRP15M-26NOV111345-45", signal_id="s1", fill=fill, closes="2026-10-31T22:45:00", **e)
+
+
+def test_a_priced_call_shows_its_side_and_cost_only_from_the_local_database(monkeypatch):
+    # On a machine without the sealed database the line says a call exists and nothing more.
+    away = feed.render(priced("filled"), color=False)
+    assert away.startswith(" 6:00 PM  CFM priced    NEW CALL   XRP · 15m · priced call on Kalshi · sealed until ")
+    assert "NO" not in away.split("NEW CALL")[1] and "¢" not in away
+    # On the operator's machine the side and the price come from the database, never from the log line.
+    monkeypatch.setattr(feed, "sealed_priced", lambda sid: {"side": "no", "limit": 0.85, "ask": 0.85, "bar": 0.86, "reason": ""})
+    here = feed.render(priced("filled"), color=False)
+    assert " NEW CALL   XRP · 15m · DOWN · NO at 85¢, 86¢ with fee · closes " in here
+
+
+def test_not_filled_and_waiting_say_why(monkeypatch):
+    monkeypatch.setattr(feed, "sealed_priced", lambda sid: {"side": "yes", "limit": 0.3, "ask": 0.335, "bar": None,
+                                                            "reason": "price above the limit"})
+    out = feed.render(priced("unfilled"), color=False)
+    assert " NOT FILLED XRP · 15m · UP · YES · price 33.5¢, limit 30¢ · not scored" in out
+    monkeypatch.setattr(feed, "sealed_priced", lambda sid: {"side": "no", "limit": 0.9, "ask": 0.85, "bar": None,
+                                                            "reason": "under 10 on offer"})
+    assert "DOWN · NO · under 10 on offer · not scored" in feed.render(priced("unfilled"), color=False)
+    assert " WAITING    XRP · 15m · Kalshi unreadable; fills at that minute's worst price" in feed.render(priced("waiting"), color=False)
+
+
+def test_a_scored_priced_call_reads_as_a_sentence():
+    base = dict(kind="scored", agent="kakalshi-crypto-first-minute-priced", pair="XRP", horizon="15m", priced=True,
+                market="KXXRP15M-26NOV111345-45", side="no")
+    won = feed.render(ev(**base, result="right", confidence=0.9, bar=0.86, venue_result="no", credit=0.0384,
+                         opened="2026-10-31T22:31:30", closed="2026-10-31T22:45:00"), color=False)
+    assert " ✔ RIGHT    XRP · 15m · DOWN NO 90% · " in won and won.endswith(" · paid 86¢ · +0.04 cr")
+    lost = feed.render(ev(**base, result="wrong", confidence=0.9, bar=0.86, venue_result="yes", credit=-0.2816,
+                          opened="2026-10-31T22:31:30", closed="2026-10-31T22:45:00"), color=False)
+    assert " ✘ WRONG " in lost and lost.endswith("-0.28 cr")
+    assert feed.render(ev(**base, result="unfilled", reason="price above the limit"), color=False) is None   # said once already
+    assert "no price or result could be found" in feed.render(ev(**base, result="void"), color=False)
+
+
+def test_priced_lines_fit_a_101_column_window(monkeypatch):
+    widest = {"side": "yes", "limit": 0.955, "ask": 0.945, "bar": 0.955, "reason": "price above the limit"}
+    monkeypatch.setattr(feed, "sealed_priced", lambda sid: widest)
+    lines = [feed.render(priced(f), color=False) for f in ("filled", "unfilled", "waiting")]
+    lines.append(feed.render(ev(kind="scored", agent="kakalshi-crypto-first-minute-priced", pair="XRP", horizon="15m",
+                                priced=True, market="m", side="yes", result="right", confidence=1.0, bar=0.955,
+                                venue_result="yes", credit=-3.99, opened="2026-10-31T22:31:30",
+                                closed="2026-10-31T22:45:00"), color=False))
+    for line in lines:
+        assert len(line) <= 101, (len(line), line)

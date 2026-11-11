@@ -50,13 +50,17 @@ def bot_lines(db, agent: Agent, start: dt.datetime, end: dt.datetime) -> list[st
     wrong = sum(s.result == "wrong" for s in rows)
     flat = sum(s.result == "flat" for s in rows)
     void = sum(s.result == "void" for s in rows)
+    unfilled = sum(s.result == "unfilled" for s in rows)
     out = [name]
     if right + wrong:
         rate = right / (right + wrong)
+        cost = [s.bar for s in rows if s.kind == "priced" and s.result in ("right", "wrong")]
         out.append(f"  {bar(rate)}  right {pct(rate)} ({right} of {right + wrong})"
-                   + (f", {flat} flat" if flat else "") + (f", {void} voided" if void else ""))
+                   + (f", cost {pct(sum(cost) / len(cost))}" if cost else "")
+                   + (f", {flat} flat" if flat else "") + (f", {void} voided" if void else "")
+                   + (f", {unfilled} not filled" if unfilled else ""))
     elif rows:
-        out.append(f"  nothing right or wrong: {flat} flat, {void} voided")
+        out.append(f"  nothing right or wrong: {flat} flat, {void} voided" + (f", {unfilled} not filled" if unfilled else ""))
     if reads:
         out.append(f"  read {reads} call{'s' if reads != 1 else ''} from other bots")
     now = service.public_agent(db, agent, None, "90d")
@@ -85,11 +89,15 @@ def report(db, day: dt.date | None = None, now: dt.datetime | None = None, days:
     right = scored.filter(Signal.result == "right").count()
     wrong = scored.filter(Signal.result == "wrong").count()
     posted = db.query(Signal).filter(Signal.submitted_at >= start, Signal.submitted_at < end).count()
+    priced = scored.filter(Signal.kind == "priced", Signal.result.in_(("right", "wrong"))).count()
+    unfilled = scored.filter(Signal.result == "unfilled").count()
+    bar_note = "a coin flip is 50%; priced calls are judged against what they cost" if priced else "a coin flip is 50%"
     lines.append(f"{posted} new calls, {scored.count()} closed: {right} right, {wrong} wrong"
-                 + (f" ({pct(right / (right + wrong))} right; a coin flip is 50%)" if right + wrong else ""))
+                 + (f", {unfilled} not filled" if unfilled else "")
+                 + (f" ({pct(right / (right + wrong))} right; {bar_note})" if right + wrong else ""))
     lines.append("")
 
-    lines.append("Bots (bar = share right, │ = coin flip):")
+    lines.append("Bots (the drawn bar = share right, │ = coin flip):")
     shown = 0
     for a in db.query(Agent).order_by(Agent.created_at).all():
         block = bot_lines(db, a, start, end)

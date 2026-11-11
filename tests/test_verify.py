@@ -199,3 +199,103 @@ def test_wrong_sender_and_late_anchor_are_flagged(client, session_factory):
     late = lambda tx: {**good, "time": good["time"] + dt.timedelta(days=9)}
     r = verify.verify_day(outsider, day, chain=late, pause=0)
     assert r["ok"] and r["anchor_late_hours"] and "days after the day closed" in verify.report(r)
+
+
+# ---------- priced calls: the room's record against Kalshi's own ----------
+
+from signal_room.sealing import priced_leaf  # noqa: E402
+from tests.test_priced import T0, XRP, BTC, call, clock, close_market, no_at_85  # noqa: E402,F401
+
+
+def priced_day(client, factory, venue, clock):
+    """One filled priced call (NO at 85c, won) and one not filled, on a day that is then anchored."""
+    no_at_85(venue)
+    no_at_85(venue, BTC)
+    author = Agent(client, "author")
+    filled = call(author).json()["signal_id"]
+    venue.quote(BTC, yes_bid=0.10, yes_ask=0.11)                        # NO now costs 90c, above the 85c limit
+    assert call(author, market=BTC).json()["fill"] == "unfilled"
+    # Kalshi's history of that minute: NO was offered between 84c and 90c.
+    venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.10, 0.16), yes_ask=(0.11, 0.17))
+    venue.settle(BTC, "no")
+    close_market(venue, clock, factory, "no")
+    return filled, *anchor(factory)
+
+
+def anchor(factory):
+    s = factory()
+    stale = s.get(DailyLog, T0.date().isoformat())
+    if stale:                                   # an anchored root is frozen; these tests re-anchor on purpose
+        stale.anchored_tx = None
+        s.commit()
+    log = service.build_daily_log(s, T0.date())
+    log.anchored_tx = "0x" + "cd" * 32
+    s.commit()
+    root = log.merkle_root
+    s.close()
+    day = T0.date().isoformat()
+    chain = lambda tx: {"found": True, "success": True, "payload": verify.expected_payload(day, root),
+                        "time": dt.datetime(2026, 11, 12, 0, 5, tzinfo=dt.timezone.utc), "sender": verify.ANCHOR_WALLET}
+    return day, chain
+
+
+def check(client, day, chain, **kw):
+    return verify.verify_day(ApiClient(Agent(client, f"outsider{len(kw)}")), day, chain=chain, pause=0,
+                             now=T0 + dt.timedelta(days=1), **kw)
+
+
+def test_a_clean_day_of_priced_calls_verifies_against_kalshi(client, session_factory, venue, clock):
+    _, day, chain = priced_day(client, session_factory, venue, clock)
+    r = check(client, day, chain)
+    assert r["ok"] and r["checked"] == 2 and r["matched"] == 2 and r["venue_checked"] == 2 and not r["venue_mismatched"]
+    text = verify.report(r)
+    assert "VERIFIED" in text and "✘" not in text and "match Kalshi's own record" in text
+
+
+def test_a_fill_changed_after_the_fact_breaks_the_leaf(client, session_factory, venue, clock):
+    filled, day, chain = priced_day(client, session_factory, venue, clock)
+    s = session_factory()
+    sig = s.get(Signal, filled)
+    sig.fill_ask, sig.bar = 0.80, 0.82                                  # a cheaper fill written in afterwards
+    s.commit()
+    s.close()
+    r = check(client, day, chain)
+    assert not r["ok"] and r["mismatched"] == [filled]
+
+
+def test_a_price_kalshi_never_showed_is_caught_even_if_the_room_was_consistent(client, session_factory, venue, clock):
+    """The room lies at the moment of the fill, so its own hashes and the anchor all agree. Only
+    Kalshi's public record of that minute can show it."""
+    filled, day, _ = priced_day(client, session_factory, venue, clock)
+    s = session_factory()
+    sig = s.get(Signal, filled)
+    sig.fill_ask, sig.bar = 0.60, 0.62
+    body = service.unseal(sig.agent_id, sig.body_cipher)
+    sig.leaf = priced_leaf(sig.hash, body["salt"], service.fill_record(sig))
+    s.commit()
+    s.close()
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert not r["mismatched"] and r["root_matches_anchor"] and r["chain_matches"]      # internally spotless
+    assert not r["ok"] and len(r["venue_mismatched"]) == 1 and "0.84 to 0.9" in r["venue_mismatched"][0]
+    assert "do NOT match Kalshi" in verify.report(r) and "NOT VERIFIED" in verify.report(r)
+
+
+def test_scoring_against_the_wrong_result_is_caught(client, session_factory, venue, clock):
+    filled, day, chain = priced_day(client, session_factory, venue, clock)
+    s = session_factory()
+    sig = s.get(Signal, filled)
+    sig.venue_result = "yes"                                            # the room claims Kalshi said YES
+    s.commit()
+    s.close()
+    r = check(client, day, chain)
+    assert not r["ok"] and "Kalshi's result is 'no'" in r["venue_mismatched"][0]
+
+
+def test_kalshi_unreachable_is_said_plainly_not_passed_off_as_checked(client, session_factory, venue, clock):
+    _, day, chain = priced_day(client, session_factory, venue, clock)
+    venue.down = True
+    r = check(client, day, chain)
+    assert r["venue_unreachable"] == 1 and r["venue_checked"] == 1      # the unfilled call needs no look at Kalshi
+    assert "could not be reached for 1 priced calls" in verify.report(r)
+    assert r["ok"]                                                      # the record itself is still intact

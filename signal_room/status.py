@@ -1,5 +1,8 @@
 """Plain-English status of the room, straight from the database. `./start.sh status`.
 
+A record of plain calls is read against a coin flip, as it always was. A record that holds priced
+calls is read against its bar: what those calls cost, fees included.
+
 Reads the same tables the API reads and runs the same scoring code, so the numbers here are the
 numbers the leaderboard shows. Nothing is cached or estimated. Safe to run while the server is up.
 """
@@ -55,8 +58,17 @@ VERDICT_WORDS = {
 }
 
 
+def points(x: float) -> str:
+    return f"{x * 100:+.0f}"
+
+
 def headline(rec: dict) -> str:
-    """'Luck · right 60% (43–74%) · skill +8'"""
+    """'Luck · right 60% (43–74%) · skill +8'. A record with priced calls is read against what they
+    cost: 'Luck · right 74% against a bar of 68% (edge +6, range -2 to +13) · skill +1'."""
+    if rec.get("priced"):
+        return (f"{VERDICT_WORDS[rec['verdict']]} · right {pct(rec['hit_rate'])} against a bar of {pct(rec['bar'])}"
+                f" (edge {points(rec['edge'])}, range {points(rec['edge_low'])} to {points(rec['edge_high'])})"
+                f" · skill {rec['skill_points']:+d}")
     return (f"{VERDICT_WORDS[rec['verdict']]} · right {pct(rec['hit_rate'])} ({pct(rec['hit_rate_low'])}–{pct(rec['hit_rate_high'])})"
             f" · skill {rec['skill_points']:+d}")
 
@@ -86,20 +98,27 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
         out.append(f"    nothing scored yet; open {len(open_)}")
         return out
     out.append("    " + headline(rec))
+    nobody = "a bot with no edge over its prices" if rec.get("priced") else "a coin-flipper"
     if rec["verdict"] == "worse_than_chance":
-        odds = f"a coin-flipper does this badly {luck(rec['p_worse'])}"
+        odds = f"{nobody} does this badly {luck(rec['p_worse'])}"
     else:
-        odds = f"a coin-flipper does this well {luck(rec['p_luck'])}"
+        odds = f"{nobody} does this well {luck(rec['p_luck'])}"
     field = f"; bar raised {rec['competitors']}x for the {rec['competitors']} ranked bots a reader chooses among" if rec["competitors"] > 1 else ""
     out.append(f"    {odds}, over {rec['tries']} separate tries (calls that share market time count once){field}")
     if not rec["ranked"]:
         out.append(f"    needs {config.MIN_RESOLVED_FOR_RANK - rec['n']} more scored signals to be ranked")
     if progress(rec):
         out.append("    " + progress(rec))
-    out.append(f"    scored {rec['n']}, flat {rec['flats']}, open {len(open_)}, voided {len(void)}, credits {service.balance(db, a.id):.1f}")
-    out.append(f"    calls vs money: ranked on calls only. If traded 1:1 at {config.ROUND_TRIP_COST * 100:.2f}% cost per trade:"
-               f" {signed(rec['cum_return'] * 100)}% (worst dip {rec['max_drawdown'] * 100:.1f}%);"
-               f" always-long over the same windows: {signed(rec['always_long_return'] * 100)}%")
+    unfilled = sum(1 for s in rows if s.result == "unfilled")
+    out.append(f"    scored {rec['n']}, flat {rec['flats']}, open {len(open_)}, voided {len(void)}"
+               + (f", not filled {unfilled}" if unfilled else "") + f", credits {service.balance(db, a.id):.1f}")
+    if rec["priced"] < rec["n"]:
+        out.append(f"    calls vs money: ranked on calls only. If traded 1:1 at {config.ROUND_TRIP_COST * 100:.2f}% cost per trade:"
+                   f" {signed(rec['cum_return'] * 100)}% (worst dip {rec['max_drawdown'] * 100:.1f}%);"
+                   f" always-long over the same windows: {signed(rec['always_long_return'] * 100)}%")
+    if rec["priced"]:
+        out.append(f"    priced calls: {rec['priced']} bought at the price the room read; average profit"
+                   f" {rec['profit_per_contract'] * 100:+.1f}¢ a contract after fees")
     judged = [c for c in rec["calibration"] if c["judged"] != "too few"]
     if judged:
         out.append("    calibration: " + "; ".join(

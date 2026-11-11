@@ -83,3 +83,18 @@ def test_weekly_report_has_a_day_by_day_line(client, session_factory):
     text = report.report(session_factory(), now=now, days=7)
     assert "Signal Room, last 7 days" in text and "By day (right/closed, all bots):" in text
     assert text.count("\n  2026-11-0") >= 3 and "8 new calls, 8 closed: 8 right, 0 wrong" in text
+
+
+def test_report_counts_priced_calls_against_their_cost(client, session_factory):
+    from tests.test_priced import T0, rows_for
+    a = ApiAgent(client, "favourite-control")
+    rows_for(session_factory, a.id, 8, 2, bar=0.80, stated=0.80)          # ten calls in the two days before T0
+    s = session_factory()
+    s.add(Signal(agent_id=a.id, pair="BTC", horizon="15m", kind="priced", venue="kalshi", market="KXBTC15M-X-00", body_cipher="-",
+                 hash="f" * 64, hash_version=4, submitted_at=T0 - dt.timedelta(days=2), resolve_at=T0 - dt.timedelta(days=2),
+                 resolved_at=T0 - dt.timedelta(days=2) + dt.timedelta(minutes=14), fill="unfilled", result="unfilled", credit=0.0))
+    s.commit()
+    text = report.report(s, now=T0, days=7)
+    assert "11 closed: 8 right, 2 wrong, 1 not filled (80% right; a coin flip is 50%; priced calls are judged against what they cost)" in text
+    assert "right 80% (8 of 10), cost 80%, 1 not filled" in text
+    s.close()

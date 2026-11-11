@@ -20,7 +20,8 @@ from . import config
 RESET, BOLD = "\033[0m", "\033[1m"
 GREEN, RED, YELLOW, GRAY, WHITE = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[37m"
 
-FAMILY_COLORS = {"kakalshi": "\033[93m", "momentum": "\033[94m", "meanrev": "\033[95m", "reader": "\033[96m", "forecaster v2": "\033[36m", "forecaster": "\033[97m"}
+FAMILY_COLORS = {"kakalshi": "\033[93m", "cfm": "\033[93m", "momentum": "\033[94m", "meanrev": "\033[95m", "reader": "\033[96m",
+                 "forecaster v2": "\033[36m", "forecaster": "\033[97m", "favourite": "\033[92m"}
 NAMES = {
     "momentum-control": "Momentum",
     "meanrev-control": "Mean-rev",
@@ -28,10 +29,12 @@ NAMES = {
     "forecaster-v1": "Forecaster v1",
     "forecaster-v2": "Forecaster v2",
     "kakalshi-crypto-first-minute": "Kakalshi CFM",
+    "kakalshi-crypto-first-minute-priced": "CFM priced",
+    "favourite-control": "Favourite",
     "kakalshi-crypto-imbalance": "Kakalshi OBI",
 }
 LOGGER_NAMES = {"agents.momentum": "Momentum", "agents.meanrev": "Mean-rev", "agents.reader": "Reader", "agents.forecaster": "Forecaster v1", "agents.forecaster2": "Forecaster v2",
-                "agents.kakalshi": "Kakalshi", "signal_room": "Room"}
+                "agents.kakalshi": "Kakalshi", "agents.favourite": "Favourite", "signal_room": "Room"}
 HORIZONS = {"15m": "15m", "1h": "1h", "4h": "4h", "24h": "24h"}
 VERDICTS = {"unproven": "Unproven", "luck": "Luck", "probably_not_luck": "Probably not luck", "proven": "Proven",
             "worse_than_chance": "Worse than chance", "delisted": "Delisted", "retired": "Retired"}
@@ -40,7 +43,8 @@ LINE = re.compile(r"^\d{4}-\d\d-\d\d (\d\d):(\d\d):\d\d,\d+ (\w+) ([\w.]+): (.*)
 # Lines the feed never shows: retries, the agents' own copies of what the server reports, routine requests.
 HIDE = re.compile(
     r"still pending|already pending|will retry|HTTP/1\.1\" [234]\d\d |'resolved': \d+\}|^==> |^\s*$"
-    r"|^(BTC|ETH|SOL|XRP) (long|short) (@|posted)|^bet \S+ \[.*\] -> |^read \S+ \S+ \S+ by |nothing affordable to read"
+    r"|^(BTC|ETH|SOL|XRP) (long|short|yes|no) (@|posted)|^bet \S+ \[.*\] -> |^read \S+ \S+ \S+ by |nothing affordable to read"
+    r"|^priced call \S+: (history|result) not readable yet"
     r"|^(Started|Waiting for|Application|Finished|Shutting down)"
 )
 
@@ -63,6 +67,11 @@ def money(p: float) -> str:
     if p >= 10:
         return f"${p:,.2f}"
     return f"${p:.4f}"
+
+
+def cents(p: float) -> str:
+    """A contract price: 0.86 → 86¢, 0.927 → 92.7¢."""
+    return f"{p * 100:.1f}".rstrip("0").rstrip(".") + "¢"
 
 
 def clock(hour: int, minute: int) -> str:
@@ -109,9 +118,72 @@ def direction_of(signal_id: str | None) -> str | None:
         return None
 
 
+def sealed_priced(signal_id: str | None) -> dict | None:
+    """One priced call's side, limit and fill from the local database, for the operator's own feed.
+    None if that is not possible here (no key, no row)."""
+    if not signal_id:
+        return None
+    try:
+        from .db import SessionLocal, Signal
+        from .sealing import unseal
+        db = SessionLocal()
+        try:
+            sig = db.get(Signal, signal_id)
+            if not sig:
+                return None
+            body = unseal(sig.agent_id, sig.body_cipher)
+            return {"side": body["side"], "limit": float(body["limit"]), "ask": sig.fill_ask, "bar": sig.bar,
+                    "reason": sig.fill_reason or ""}
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def call_words(side: str) -> str:
+    """A side of an up-or-down market as the direction it bets on: 'DOWN · NO'."""
+    return ("UP · YES" if side == "yes" else "DOWN · NO")
+
+
+def render_priced(e: dict, when: str, p: Painter, where: str) -> str | None:
+    """A priced call's fill, shown the moment the room decides it. The side and the price come from the
+    sealed database on this machine, never from the log line."""
+    who, fill = e.get("agent", "?"), e.get("fill")
+    if fill == "waiting":
+        return p.row(when, who, "WAITING", YELLOW, f"{where} · Kalshi unreadable; fills at that minute's worst price")
+    call = sealed_priced(e.get("signal_id"))
+    if call is None:
+        state = "not filled, not scored" if fill == "unfilled" else f"sealed until {short(e['closes'])}"
+        return p.row(when, who, "NEW CALL" if fill == "filled" else "NOT FILLED", WHITE if fill == "filled" else GRAY,
+                     f"{where} · priced call on Kalshi · {state}")
+    said = call_words(call["side"])
+    if fill == "filled":
+        return p.row(when, who, "NEW CALL", WHITE,
+                     f"{where} · {said} at {cents(call['ask'])}, {cents(call['bar'])} with fee · closes {short(e['closes'])}")
+    if call["reason"] == "price above the limit" and call["ask"] is not None:
+        why = f"price {cents(call['ask'])}, limit {cents(call['limit'])}"
+    else:
+        why = call["reason"]
+    return p.row(when, who, "NOT FILLED", GRAY, f"{where} · {said} · {why} · not scored")
+
+
 def render_event(e: dict, when: str, p: Painter) -> str | None:
     kind, who = e.get("kind"), e.get("agent", "?")
     where = f"{e.get('pair', '')} · {HORIZONS.get(e.get('horizon'), e.get('horizon', ''))}"
+    if kind == "priced":
+        return render_priced(e, when, p, where)
+    if kind == "scored" and e.get("priced"):
+        result = e.get("result")
+        if result == "unfilled":
+            return None   # already shown as NOT FILLED when the room decided it
+        if result == "void":
+            return p.row(when, who, "– VOID", GRAY, f"{where} · no price or result could be found, not scored")
+        badge, code = ("✔ RIGHT", GREEN + BOLD) if result == "right" else ("✘ WRONG", RED + BOLD)
+        credit = p(GREEN if e["credit"] >= 0 else RED, f"{e['credit']:+.2f} cr")
+        side = "YES" if e["side"] == "yes" else "NO"
+        return p.row(when, who, badge, code,
+                     f"{where} · {'UP' if e['side'] == 'yes' else 'DOWN'} {side} {e['confidence'] * 100:.0f}% · "
+                     f"{short(e['opened'])}→{short(e['closed'])} · paid {cents(e['bar'])} · {credit}")
     if kind == "posted":
         return None   # shown a minute later, once the room has set the call's start price
     if kind == "started":
@@ -201,7 +273,7 @@ def render(line: str, color: bool = True) -> str | None:
 
 
 def versus_coin_flip(points: int) -> tuple[str, str]:
-    """Skill as a direction a glance can read: (text, color)."""
+    """Skill against the bar (a coin flip for plain calls) as a direction a glance can read: (text, color)."""
     if abs(points) <= 1:
         return "≈ even", GRAY
     if points > 0:
@@ -244,7 +316,7 @@ def scoreboard(color: bool = True) -> list[str]:
         vw = max([len("Verdict")] + [len(VERDICTS.get(r["verdict"], r["verdict"])) for _, r in bots])
         title = f" Scoreboard · {dt.datetime.now().strftime('%I:%M %p').lstrip('0')} "
         out = ["", p(BOLD, f"──{title}" + "─" * max(4, 70 - len(title)))]
-        out.append(p(GRAY, f"  {'Bot':<13} {'Verdict':<{vw}}  {'Right':>5}   {'vs. coin flip':<13}  {'Calls':>5}   Next step"))
+        out.append(p(GRAY, f"  {'Bot':<13} {'Verdict':<{vw}}  {'Right':>5}   {'vs. its bar':<13}  {'Calls':>5}   Next step"))
         for a, r in bots:
             name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
             verdict = VERDICTS.get(r["verdict"], r["verdict"])
@@ -264,6 +336,7 @@ def scoreboard(color: bool = True) -> list[str]:
                 name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
                 out.append(f"  {name} {n} paid read{'s' if n != 1 else ''} · {right} of {closed} right · {credits:g} credit{'' if credits == 1 else 's'} left")
         out.append(p(GRAY, "  Ladder: Unproven → Luck → Probably not luck → Proven · cr = credits"))
+        out.append(p(GRAY, "  Bar: what a call cost. A coin flip for a plain call, price + fee for a priced one."))
         out.append(p(BOLD, "─" * 72))
         out.append("")
         return out
