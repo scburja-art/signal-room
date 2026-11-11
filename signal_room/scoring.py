@@ -516,8 +516,9 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         if sd > 0:
             sharpe = mean / sd   # per call: mean net return over its spread. Not annualised (windows differ) and
             #                      not multiplied by sqrt(n), which would make it a t-statistic that grows with n.
-    # The betting account: every right/wrong/flat call takes a stake when it starts. A flat pays it back.
-    staked = [i for i, r in enumerate(results) if r in ("right", "wrong", "flat")]
+    # The betting account: every call takes a stake when it starts. A flat, or a priced call that went
+    # unfilled, pays it back. (A void call is left out: voids come from the room's own outages.)
+    staked = [i for i, r in enumerate(results) if r in ("right", "wrong", "flat", "unfilled")]
     timeline = Timeline([windows[i] for i in staked], pending) if windows is not None else Timeline.in_order(len(staked))
     at = {i: j for j, i in enumerate(keep)}          # a staked call's place among the scored ones
 

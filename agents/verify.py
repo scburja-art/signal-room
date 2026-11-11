@@ -173,8 +173,11 @@ class KalshiPublic:
             raise VenueDown("Kalshi's answer was not JSON") from e
 
     def market(self, ticker: str) -> dict | None:
-        body = self._get(f"/markets/{ticker}")
-        return (body or {}).get("market")
+        for path in (f"/markets/{ticker}", f"/historical/markets/{ticker}"):   # Kalshi moves old markets to its archive
+            market = (self._get(path) or {}).get("market")
+            if isinstance(market, dict):
+                return market
+        return None
 
     def minute(self, ticker: str, at: dt.datetime) -> dict | None:
         """Kalshi's one-minute record holding the moment `at` (naive UTC), or None if it has none."""
@@ -205,9 +208,9 @@ def _same(a, b) -> bool:
 def check_priced(body: dict, venue) -> tuple[str | None, bool]:
     """(what is wrong, whether Kalshi's record was consulted) for one closed priced call. First the room's
     own record of the call is held to the room's own published rules; then to Kalshi's public record.
-    Raises VenueDown if Kalshi cannot be read. Two things public data cannot settle, so they stay on the
-    room's word: how many contracts were on offer at the price, and where inside the minute's range
-    the price stood at the second the room looked."""
+    Raises VenueDown if Kalshi cannot be read. Public data cannot settle everything, and what it cannot
+    stays on the room's word: how many contracts were on offer at the price on a live look, and where
+    inside its minute's range the price stood at the second the room looked."""
     fill, result, side = body.get("fill"), body.get("result"), body.get("side")
     posted = dt.datetime.fromisoformat(body["submitted_at"])
     if not fill:
@@ -250,47 +253,85 @@ def check_priced(body: dict, venue) -> tuple[str | None, bool]:
     else:
         return f"unknown fill status {status!r}", False
 
-    # Kalshi's own record.
+    # The score must follow from the stated chance, the cost and the result (none of them is in the leaf).
+    if status == "filled" and result in ("right", "wrong"):
+        y = 1.0 if result == "right" else 0.0
+        bar, stated = float(fill["bar"]), body.get("stated")
+        scored = bar if stated is None else max(float(stated), bar)     # a chance below the cost claims nothing
+        if not _same(body.get("brier"), round((scored - y) ** 2, 6)):
+            return f"Brier recorded as {body.get('brier')}, the stated chance and the result give {round((scored - y) ** 2, 6)}", False
+        if not _same(body.get("net_return"), round(y - bar, 6)):
+            return f"profit recorded as {body.get('net_return')}, the result less the cost is {round(y - bar, 6)}", False
+
+    # Kalshi's own record. Anything odd in Kalshi's answers is Kalshi's, not the room's: the call is then
+    # left unchecked (NOT YET), never failed and never passed.
+    try:
+        return _against_kalshi(body, venue, fill, posted, at, closes), True
+    except VenueDown:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as e:
+        raise VenueDown(f"Kalshi's record of this market could not be read ({type(e).__name__})") from e
+
+
+def _against_kalshi(body: dict, venue, fill: dict, posted: dt.datetime, at: dt.datetime, closes: dt.datetime) -> str | None:
+    status, source, reason = fill.get("fill"), fill.get("source"), fill.get("reason") or ""
+    ask, bid, size = fill.get("ask"), fill.get("bid"), float(fill.get("size") or 0.0)
+    result, side = body.get("result"), body.get("side")
     market = venue.market(body["market"])
     if market is None:
-        return (None if reason == "no such market" else "Kalshi has no such market"), True
+        if reason == "no such market":
+            return None
+        raise VenueDown("Kalshi no longer serves this market")       # archived, or never there: cannot be told apart
     if reason == "no such market":
-        return "recorded as 'no such market', and Kalshi has it", True
+        return "recorded as 'no such market', and Kalshi has it"
     opens, real_close = _utc(market["open_time"]), _utc(market["close_time"])
     if reason == "market was not open":
-        return (None if not (opens <= posted < real_close) else "recorded as 'market was not open', and it was"), True
-    if closes != real_close:
-        return f"the room closed the call at {body['resolve_at']}, Kalshi's market closed at {market['close_time']}", True
+        return None if not (opens <= posted < real_close) else "recorded as 'market was not open', and it was"
     if not (opens <= posted < real_close):
-        return "the call was stamped outside the market's trading window", True
+        return "the call was stamped outside the market's trading window"
+    if abs((closes - real_close).total_seconds()) > 2:
+        # Kalshi can move a close. That matters only if the fill decision would have been another one.
+        again = fill_rule(None if ask is None else float(ask), size, float(body["limit"]), (real_close - at).total_seconds())
+        if again != (status, reason):
+            return f"the room closed the call at {body['resolve_at']}, Kalshi's market closed at {market['close_time']}"
     final = market.get("result") if market.get("status") == "finalized" else None
     if status == "filled":
         if result == "void":
             if final in ("yes", "no"):
-                return f"voided, though Kalshi's result is {final}", True
+                return f"voided, though Kalshi's result is {final}"
         else:
             if final != body.get("venue_result"):
-                return f"Kalshi's result is {final!r}, the room scored it as {body.get('venue_result')!r}", True
+                return f"Kalshi's result is {final!r}, the room scored it as {body.get('venue_result')!r}"
             if (result == "right") != (final == side):
-                return f"scored {result} for {side} though Kalshi's result is {final}", True
+                return f"scored {result} for {side} though Kalshi's result is {final}"
+
+    # Every minute the look could have fallen in: from the call's stamp to the moment the room says it read.
+    moments = {posted} if source == "history" else {posted, at, at - dt.timedelta(seconds=5), at + dt.timedelta(seconds=5)}
+    candles = {}
+    for moment in moments:
+        candle = venue.minute(body["market"], moment)
+        if candle is not None:
+            candles[candle["end_period_ts"]] = candle
+    if not candles:
+        raise VenueDown("Kalshi has no record of that minute")
+    ranges = [side_ranges(c, side) for c in candles.values()]
+    always_offered = all(0.0 < lo and hi < 1.0 for lo, hi, _, _ in ranges)
+    always_bid = all(0.0 < lo and hi < 1.0 for _, _, lo, hi in ranges)
+    shown = f"{min(r[0] for r in ranges)} to {max(r[1] for r in ranges)}"
     if ask is None:
-        return None, True
-    seen = []
-    for moment in ((at, at - dt.timedelta(seconds=5), at + dt.timedelta(seconds=5)) if source == "live" else (at,)):
-        candle = venue.minute(body["market"], moment)     # a live read can straddle a minute
-        if candle is None:
-            continue
-        ask_lo, ask_hi, bid_lo, bid_hi = side_ranges(candle, side)
-        seen.append((ask_lo, ask_hi))
+        return f"recorded as nothing on offer; Kalshi shows offers of {shown} throughout" if always_offered else None
+    if bid is None and always_bid:
+        return f"recorded with no bid; Kalshi shows bids of {min(r[2] for r in ranges)} to {max(r[3] for r in ranges)} throughout"
+    for candle, (ask_lo, ask_hi, bid_lo, bid_hi) in zip(candles.values(), ranges):
         if source == "history":
             worst_bid = bid_lo if 0.0 < bid_lo < 1.0 else None
             if abs(float(ask) - ask_hi) < 1e-6 and _same(bid, worst_bid):
-                return None, True                     # the worst price of the minute, as the rule says
+                if not _same(size, float(candle["volume_fp"])):
+                    return f"recorded {size} contracts traded that minute, Kalshi's record says {candle['volume_fp']}"
+                return None                           # the worst price of the minute, as the rule says
         elif ask_lo - 1e-6 <= float(ask) <= ask_hi + 1e-6 and (bid is None or bid_lo - 1e-6 <= float(bid) <= bid_hi + 1e-6):
-            return None, True
-    if not seen:
-        return "Kalshi has no record of that minute", True
-    return f"the room says the price was {ask} (bid {bid}), Kalshi's record of that minute shows {seen[0][0]} to {seen[0][1]}", True
+            return None
+    return f"the room says the price was {ask} (bid {bid}), Kalshi's record of that minute shows {shown}"
 
 
 def merkle_root(hashes: list[str]) -> str:
@@ -361,6 +402,7 @@ def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, 
     closed = [x for x in listed if not is_open(x, now)]
     out["still_open"] = len(listed) - len(closed)
     todo = closed if not sample or sample >= len(closed) else random.Random(day).sample(closed, sample)
+    live_looks, unread = [], []      # when the room read Kalshi live; calls it says it could not get a price for
     for i, item in enumerate(todo, 1):
         body = client.read(item["signal_id"])
         if body.get("result") is None:
@@ -374,6 +416,11 @@ def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, 
                     wrong, consulted = check_priced(body, venue)
                     out["venue_checked"] += consulted
                     out["venue_unseen"] += (not consulted) and not wrong
+                    fill = body.get("fill") or {}
+                    if fill.get("source") == "live":
+                        live_looks.append(dt.datetime.fromisoformat(fill["at"]))
+                    elif not fill and not wrong:
+                        unread.append((item["signal_id"], dt.datetime.fromisoformat(body["submitted_at"])))
                     if wrong:
                         out["venue_mismatched"].append(f"{item['signal_id']}: {wrong}")
                 except VenueDown:
@@ -392,6 +439,15 @@ def verify_day(client, day: str, chain=chain_lookup, sample: int | None = None, 
         progress(i, len(todo))
         if pause and i < len(todo):
             time.sleep(pause)
+
+    # A call voided for want of a price is the one record Kalshi cannot contradict, so it is held to the
+    # room's own day: "could not get a price for half an hour" does not sit with live looks in that half hour.
+    for sid, posted in unread:
+        near = [t for t in live_looks if posted <= t <= posted + dt.timedelta(seconds=1800)]
+        if near:
+            out["venue_unseen"] -= 1
+            out["venue_mismatched"].append(f"{sid}: voided for want of a price, though the room read Kalshi live {len(near)} "
+                                           f"times in the half hour that followed")
 
     # Link 2: the day's root from the published leaves.
     out["root"] = merkle_root([leaf_of(x) for x in listed])
@@ -432,11 +488,14 @@ def report(r: dict) -> str:
         lines.append(f"  ✔ Kalshi: all {r['venue_checked']} priced calls checked match Kalshi's own record (result, close, "
                      "and the price seen that minute); the size on offer rests on the room's word")
     if r.get("venue_unseen"):
-        lines.append(f"  – Kalshi: {r['venue_unseen']} priced calls were voided for want of a price; Kalshi's record cannot confirm or deny that")
+        lines.append(f"  ⚠ Kalshi: {r['venue_unseen']} priced calls were voided for want of a price; Kalshi's record cannot confirm or deny that")
     if r.get("venue_unreachable"):
         lines.append(f"  – Kalshi: could not be reached for {r['venue_unreachable']} priced calls; their fills and results were not re-checked")
-    lines.append(f"  {'✔' if r['root_matches_anchor'] else '✘'} day: fingerprint rebuilt from every call "
-                 f"{'matches' if r['root_matches_anchor'] else 'does NOT match'} the anchored one ({r['root'][:12]}…)")
+    if r["anchored_tx"]:
+        lines.append(f"  {'✔' if r['root_matches_anchor'] else '✘'} day: fingerprint rebuilt from every call "
+                     f"{'matches' if r['root_matches_anchor'] else 'does NOT match'} the anchored one ({r['root'][:12]}…)")
+    else:
+        lines.append(f"  – day: fingerprint rebuilt from every call is {r['root'][:12]}…; nothing anchored to compare it with yet")
     c = r["chain"]
     if not r["anchored_tx"]:
         lines.append("  – chain: this day has not been anchored yet")
@@ -451,7 +510,9 @@ def report(r: dict) -> str:
         if r["anchor_late_hours"]:
             lines.append(f"  ⚠ chain: anchored {r['anchor_late_hours'] / 24:.1f} days after the day closed; the record could have been edited before then")
         lines.append(f"    {EXPLORER}{r['anchored_tx']}")
-    if r["ok"]:
+    if not r["anchored_tx"] and not r["mismatched"] and not r.get("venue_mismatched"):
+        lines.append("NOT YET: this day has not been anchored; until it is, nothing outside the room holds it to this record.")
+    elif r["ok"]:
         since = c["time"].astimezone().strftime("%b %d %I:%M %p").replace(" 0", " ")
         lines.append(f"VERIFIED: nothing in this day's record has changed since it was anchored ({since}).")
     elif r.get("intact", True) and r["still_open"] and not r["mismatched"] and r["root_matches_anchor"] and r["chain_matches"] and r["sender_matches"]:

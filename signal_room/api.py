@@ -135,7 +135,7 @@ def post_priced(body: PricedIn, agent: Agent = Depends(auth.signed_agent), db: S
     sig = service.submit_priced(db, agent, body.venue, body.market, body.side, body.limit, body.confidence)
     # The author may know its own fill at once; nobody else sees the side or the price until the market closes.
     return {"signal_id": sig.id, "submitted_at": sig.submitted_at.isoformat(), "resolve_at": sig.resolve_at.isoformat(),
-            "hash": sig.hash, "hash_version": sig.hash_version, "fill": sig.fill or "waiting",
+            "hash": sig.hash, "hash_version": sig.hash_version, "fill": (sig.seen or {}).get("status") or "waiting",
             "fill_reason": (sig.seen or {}).get("reason") or None, "price": (sig.seen or {}).get("ask"),
             "cost": (sig.seen or {}).get("bar"),
             "note": "filled: scored against cost (price + fee) by the venue's result. unfilled: recorded, never scored. "

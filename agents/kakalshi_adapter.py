@@ -55,7 +55,7 @@ def load_posted(path: str) -> set:
     try:
         with open(path) as f:
             return set(json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):   # missing, torn, or not a list of names
         return set()
 
 
@@ -113,7 +113,8 @@ def handle(bet: dict, now, started: dt.datetime, posted: set, client_for, holdof
     bid = f"{bet.get('id')}@{bet.get('timestamp', '')}"
     if bid in posted:
         return False
-    now = now() if callable(now) else now
+    clock = now if callable(now) else (lambda: now)
+    now = clock()
     if holdoff is not None and bid in holdoff and now < holdoff[bid]:
         return True
     try:
@@ -132,6 +133,10 @@ def handle(bet: dict, now, started: dt.datetime, posted: set, client_for, holdof
         posted.add(bid)
         return False
     age = (now - ts).total_seconds()
+    if age < -MAX_AGE_SECONDS:
+        log.warning("bet %s: stamped %.0fs in the future; skipped", bid, -age)
+        posted.add(bid)
+        return False
     if age > MAX_AGE_SECONDS:
         log.info("bet %s: first seen %.0fs after it was made, too late to post", bid, age)
         posted.add(bid)
@@ -147,7 +152,7 @@ def handle(bet: dict, now, started: dt.datetime, posted: set, client_for, holdof
         if e.status in TRANSIENT_STATUSES:
             log.info("bet %s: %s, will retry", bid, e)
             if holdoff is not None:
-                holdoff[bid] = now + dt.timedelta(seconds=RETRY_SECONDS)
+                holdoff[bid] = clock() + dt.timedelta(seconds=RETRY_SECONDS)   # from the end of the try
             return True
         log.warning("bet %s: rejected: %s", bid, e)
         posted.add(bid)
@@ -155,7 +160,7 @@ def handle(bet: dict, now, started: dt.datetime, posted: set, client_for, holdof
     except Exception as e:  # network blip, server restart: retry shortly
         log.warning("bet %s: post failed (%s), will retry", bid, type(e).__name__)
         if holdoff is not None:
-            holdoff[bid] = now + dt.timedelta(seconds=RETRY_SECONDS)
+            holdoff[bid] = clock() + dt.timedelta(seconds=RETRY_SECONDS)   # from the end of the try
         return True
 
 

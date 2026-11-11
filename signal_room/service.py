@@ -255,42 +255,45 @@ def decide_fill(ask: float | None, size: float, limit: float, seconds_left: floa
 
 # Serializes the closing of a priced call and the deciding of its fill. The minute tick and a bot's next
 # post can both reach the same call in the same instant; without this both paid its credits (review
-# finding 2026-11-11). One process, so a process lock is enough. Never held across a read of the venue.
+# finding 2026-11-11). One process, so a process lock is enough; the close is also claimed with a
+# guarded UPDATE so a second process cannot pay again either. Never held across a read of the venue.
 _settle_lock = threading.Lock()
 
-SEEN = ("reason", "ask", "bid", "size", "bar", "fade_bar")   # what the room saw at the venue, sealed until close
+DECIDED = "decided"   # what an open row shows once its fill is decided: that it is, never which way
 
 
 def _seen(sig: Signal, body: dict) -> dict:
-    """What the room saw at the venue for this call. While the call is open it lives only in the sealed
-    body (the price would give the side away); at close it is copied onto the row."""
-    if sig.resolved_at is None and body.get("fill") is not None:
-        return body["fill"]
+    """What the room saw at the venue for this call, and what it decided: status (filled | unfilled |
+    None while waiting), reason, ask, bid, size, bar, fade_bar. While the call is open all of it lives
+    only in the sealed body (the price would give the side away, and whether a one-sided market filled
+    says the side too); at close it is copied onto the row."""
+    if sig.resolved_at is None:
+        return body.get("fill") or {"status": None, "reason": "", "ask": None, "bid": None, "size": None,
+                                    "bar": None, "fade_bar": None}
     # Closed: the row is the record the scores are computed from, so the row is what is shown and checked.
-    return {"reason": sig.fill_reason or "", "ask": sig.fill_ask, "bid": sig.fill_bid, "size": sig.fill_size,
-            "bar": sig.bar, "fade_bar": sig.fade_bar}
+    return {"status": sig.fill, "reason": sig.fill_reason or "", "ask": sig.fill_ask, "bid": sig.fill_bid,
+            "size": sig.fill_size, "bar": sig.bar, "fade_bar": sig.fade_bar}
 
 
 def fill_record(sig: Signal, body: dict) -> dict:
     """What the room saw at the venue for this call, exactly as the day's leaf commits to it."""
     seen = _seen(sig, body)
-    return {"fill": sig.fill, "reason": seen["reason"] or "", "at": sig.fill_at.isoformat() if sig.fill_at else None,
+    return {"fill": seen["status"], "reason": seen["reason"] or "", "at": sig.fill_at.isoformat() if sig.fill_at else None,
             "ask": seen["ask"], "bid": seen["bid"], "size": seen["size"], "source": sig.fill_source,
             "bar": seen["bar"], "fade_bar": seen["fade_bar"]}
 
 
 def _set_fill(sig: Signal, body: dict, status: str, reason: str, at: dt.datetime, ask: float | None,
               bid: float | None, size: float, source: str, closes: dt.datetime) -> None:
-    """Record the fill decision. The row shows only that a decision was made, when, and how; the prices
-    go into the sealed body."""
+    """Record the fill decision. The row shows only that a decision was made, when, and how; which way
+    it went and the prices go into the sealed body."""
     filled = status == "filled"
-    body["fill"] = {"reason": reason or "", "ask": ask, "bid": bid, "size": size,
+    body["fill"] = {"status": status, "reason": reason or "", "ask": ask, "bid": bid, "size": size,
                     "bar": kalshi.cost(ask) if filled else None, "fade_bar": kalshi.fade_bar(bid) if filled else None}
     sig.body_cipher = seal(sig.agent_id, body)
-    sig.fill, sig.fill_at, sig.fill_source = status, at, source
+    sig.fill, sig.fill_at, sig.fill_source = DECIDED, at, source
     sig.resolve_at = closes                       # a priced call closes when its market does
-    if filled:
-        sig.start_at = at                         # its scored window: from the fill to the market's close
+    sig.start_at = at                             # its window in the betting account: from the look to the market's close
     sig.leaf = priced_leaf(sig.hash, body["salt"], fill_record(sig, body))
 
 
@@ -306,6 +309,9 @@ def submit_priced(db: Session, agent: Agent, venue: str, market: str, side: str,
     series, pair, horizon = parsed
     if side not in ("yes", "no"):
         raise HTTPException(422, "side must be yes or no")
+    # Four decimals is what the hash commits to; the fill is decided on exactly that number.
+    limit = round(limit, 4)
+    confidence = None if confidence is None else round(confidence, 4)
     if not (0.0 < limit < 1.0):
         raise HTTPException(422, "limit is the most you would pay per contract, in dollars: between 0 and 1")
     if confidence is not None and not (limit <= confidence <= config.MAX_CONFIDENCE):
@@ -317,6 +323,9 @@ def submit_priced(db: Session, agent: Agent, venue: str, market: str, side: str,
     _, settled = settle_priced(db, utcnow(), agent_id=agent.id, pair=pair)
     if settled:
         update_standing(db, settled)
+        db.refresh(agent)
+        if agent.status == "retired":             # the call just settled was the one that retired the wallet
+            raise HTTPException(403, "wallet retired")
     _may_post(db, agent, pair, horizon)
     db.commit()   # hand the database connection back before the look at the venue, which can take seconds
 
@@ -358,8 +367,8 @@ def submit_priced(db: Session, agent: Agent, venue: str, market: str, side: str,
             raise HTTPException(409, "one open signal per pair per horizon")
         log.error("priced signal insert failed: %s", e.orig)
         raise HTTPException(500, "the room could not store the signal; see the server log")
-    sig.seen = _seen(sig, body) if sig.fill else None   # for the author's receipt only; not a column
-    # No side and no price here: either would give an open call away.
+    sig.seen = _seen(sig, body)   # for the author's receipt only; not a column
+    # No side, no price, and not which way the fill went: any of them could give an open call away.
     event("priced", agent=agent.name or agent.id, pair=pair, horizon=horizon, market=market, signal_id=sig.id,
           fill=sig.fill or "waiting", closes=sig.resolve_at.isoformat())
     return sig
@@ -376,15 +385,16 @@ def fill_from_history(db: Session, sig: Signal, now: dt.datetime) -> bool:
     try:
         kalshi.check_fee_rule(kalshi.parse_ticker(sig.market)[0])
         quote = kalshi.quote(kalshi.fetch_market(sig.market), body["side"])
-        minute = kalshi.fetch_minute(sig.market, sig.submitted_at)
-        if minute is None:
-            return False
-        _, ask_high, bid_low, volume = kalshi.minute_range(minute, body["side"])
-        ask = ask_high if 0.0 < ask_high < 1.0 else None
-        bid = bid_low if 0.0 < bid_low < 1.0 else None
         if not (quote.open_time <= sig.submitted_at < quote.close_time):
-            decided = ("unfilled", "market was not open", ask, bid, volume, quote.close_time)
+            # Nothing to look up: no minute of that market holds the call.
+            decided = ("unfilled", "market was not open", None, None, 0.0, max(quote.close_time, sig.submitted_at))
         else:
+            minute = kalshi.fetch_minute(sig.market, sig.submitted_at)
+            if minute is None:
+                return False
+            _, ask_high, bid_low, volume = kalshi.minute_range(minute, body["side"])
+            ask = ask_high if 0.0 < ask_high < 1.0 else None
+            bid = bid_low if 0.0 < bid_low < 1.0 else None
             status, why = decide_fill(ask, volume, float(body["limit"]), (quote.close_time - sig.submitted_at).total_seconds())
             decided = (status, why, ask, bid, volume, quote.close_time)
     except kalshi.NoSuchMarket:
@@ -408,21 +418,32 @@ def fill_from_history(db: Session, sig: Signal, now: dt.datetime) -> bool:
     return True
 
 
+def _each_priced(db: Session, rows: list[Signal], step, what: str) -> None:
+    """Run step(sig) for each row. No answer at all from Kalshi ends the asking for this tick (the next
+    row would only wait out the same timeout); anything else, a busy answer for one market or a bad
+    row, is that row's problem alone and the rest go on."""
+    for sig in rows:
+        try:
+            step(sig)
+        except kalshi.VenueOffline as e:
+            db.rollback()
+            log.warning("Kalshi cannot be reached (%s); %s until the next tick", e, what)
+            break
+        except kalshi.VenueUnreachable as e:
+            db.rollback()
+            log.info("priced call %s: Kalshi did not answer for its market (%s); it waits", sig.id, e)
+        except Exception as e:   # one bad row must not stop the rest, and a real call is never voided over a passing error
+            db.rollback()
+            log.exception("priced call %s failed this tick: %s", sig.id, type(e).__name__)
+
+
 def fill_waiting(db: Session, now: dt.datetime | None = None) -> int:
     """Decide, from history, every priced call still waiting for a fill. Returns how many were decided."""
     now = now or utcnow()
-    done = 0
-    for sig in db.query(Signal).filter(Signal.kind == "priced", Signal.fill.is_(None), Signal.resolved_at.is_(None)).all():
-        try:
-            done += fill_from_history(db, sig, now)
-        except kalshi.VenueUnreachable as e:   # asking again for the next call would only wait again
-            db.rollback()
-            log.warning("Kalshi cannot be reached (%s); waiting calls stay waiting until the next tick", e)
-            break
-        except Exception as e:   # one bad row must not stop the rest
-            db.rollback()
-            log.exception("fill from history failed for %s: %s", sig.id, type(e).__name__)
-    return done
+    done = []
+    rows = db.query(Signal).filter(Signal.kind == "priced", Signal.fill.is_(None), Signal.resolved_at.is_(None)).all()
+    _each_priced(db, rows, lambda sig: done.append(1) if fill_from_history(db, sig, now) else None, "waiting calls stay waiting")
+    return len(done)
 
 
 def settle_priced(db: Session, now: dt.datetime | None = None, agent_id: str | None = None,
@@ -434,64 +455,57 @@ def settle_priced(db: Session, now: dt.datetime | None = None, agent_id: str | N
         q = q.filter(Signal.agent_id == agent_id)
     if pair:
         q = q.filter(Signal.pair == pair)
-    count, touched = 0, set()
-    for sig in q.all():
-        try:
-            if _settle_one(db, sig, now):
-                count += 1
-                touched.add(sig.agent_id)
-        except kalshi.VenueUnreachable as e:
-            db.rollback()
-            log.warning("Kalshi cannot be reached (%s); closed calls wait for their result until the next tick", e)
-            break
-        except Exception as e:   # never void a real call over a passing error: leave it for the next tick
-            db.rollback()
-            log.exception("settle failed for priced signal %s: %s", sig.id, type(e).__name__)
-    return count, touched
+    touched: list[str] = []
+    _each_priced(db, q.all(), lambda sig: touched.append(sig.agent_id) if _settle_one(db, sig, now) else None,
+                 "closed calls wait for their result")
+    return len(touched), set(touched)
 
 
 def _settle_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
     """Close one priced call whose market has closed. False while it cannot be closed yet. Raises
-    VenueUnreachable while Kalshi cannot be reached and there is still time to wait."""
+    VenueUnreachable while Kalshi cannot be reached: a filled call then waits, however long."""
     if sig.fill is None:
-        # No price yet. The venue's history is asked for half an hour; after that there is nothing to score.
+        # No price yet. The venue's history is asked for half an hour; after that there is nothing to
+        # score, whatever stood in the way (the deadline holds even if every look fails).
         give_up = (now - sig.submitted_at).total_seconds() > config.PRICED_FILL_WAIT_SECONDS
         try:
             decided = fill_from_history(db, sig, now)
-        except kalshi.VenueUnreachable:
+        except Exception:
             if not give_up:
                 raise
+            db.rollback()
             decided = False
         if not decided and not give_up:
             return False
         if decided and sig.resolve_at > now:
             return False                           # the market's real close is later than the provisional one
+    was_decided = sig.fill is not None
     body = unseal(sig.agent_id, sig.body_cipher)
     side, stated, seen = body["side"], body.get("confidence"), _seen(sig, body)
+    since_close = (now - sig.resolve_at).total_seconds()
 
-    scored = None                                  # (outcome, result, confidence, brier, credit, profit)
-    if sig.fill is None:
+    scored = None                                  # (outcome, confidence, brier, credit, profit)
+    if not was_decided:
         verdict, note = "void", "no price could be established"
-    elif sig.fill == "unfilled":
+    elif seen["status"] == "unfilled":
         verdict, note = "unfilled", ""
     else:
-        outcome = None
+        # A filled call is a real call. It is closed only on an answer from Kalshi: its result, or, once
+        # the deadline has passed, Kalshi saying there still is none. Unreachable or unusable: it waits.
         try:
             outcome = kalshi.result(kalshi.fetch_market(sig.market))
         except kalshi.NoResult:
-            pass
+            if since_close <= config.PRICED_ODD_RESULT_SECONDS:
+                return False                       # one odd answer is not the last word
+            outcome = "none"
         except kalshi.VenueUnreachable:
-            if (now - sig.resolve_at).total_seconds() / 3600 <= config.BACKFILL_WINDOW_HOURS:
-                raise
+            raise
         except kalshi.VenueError as e:
-            if (now - sig.resolve_at).total_seconds() / 3600 <= config.BACKFILL_WINDOW_HOURS:
-                log.warning("priced call %s: Kalshi's record of the result cannot be used (%s)", sig.id, e)
-                return False
-        else:
-            if outcome is None:                    # not finalised yet
-                if (now - sig.resolve_at).total_seconds() / 3600 <= config.BACKFILL_WINDOW_HOURS:
-                    return False
-        if outcome is None:
+            log.warning("priced call %s: Kalshi's record of the result cannot be used (%s); it waits", sig.id, e)
+            return False
+        if outcome is None and since_close / 3600 <= config.BACKFILL_WINDOW_HOURS:
+            return False                           # not finalised yet; try again next tick
+        if outcome not in ("yes", "no"):
             verdict, note = "void", "the venue gave no yes-or-no result"
         else:
             bar = seen["bar"]
@@ -503,15 +517,23 @@ def _settle_one(db: Session, sig: Signal, now: dt.datetime) -> bool:
             bs = scoring.brier(confidence, y)
             scored = (outcome, confidence, round(bs, 6), round(scoring.credit_for(bs, verdict, bar), 4), round(y - bar, 6))
 
+    closed_at = now if verdict == "void" else sig.resolve_at
     with _settle_lock:
         db.rollback()                              # end any open read so the row is seen as it is now
         db.refresh(sig)
-        if sig.resolved_at is not None:
-            return False                           # another thread closed it while this one was at the venue
-        # Only now, as the call closes, do its side and what the room saw go onto the row.
-        sig.result, sig.resolved_at = verdict, (now if verdict == "void" else sig.resolve_at)
+        if sig.resolved_at is not None or (sig.fill is not None) != was_decided:
+            return False                           # closed, or its fill decided, by another thread meanwhile
+        # The close is claimed in the database itself: whoever's UPDATE finds the row still open closes it.
+        claimed = (db.query(Signal).filter(Signal.id == sig.id, Signal.resolved_at.is_(None))
+                   .update({Signal.resolved_at: closed_at}, synchronize_session=False))
+        if claimed != 1:
+            db.rollback()
+            return False
+        # Only now, as the call closes, do its side, its fill and what the room saw go onto the row.
+        sig.result, sig.resolved_at = verdict, closed_at
         sig.side, sig.limit_price = side, float(body["limit"])
         sig.direction = "long" if side == "yes" else "short"   # these markets ask "will it finish higher?"
+        sig.fill = seen["status"]
         sig.fill_reason, sig.fill_ask, sig.fill_bid, sig.fill_size = seen["reason"] or None, seen["ask"], seen["bid"], seen["size"]
         sig.bar, sig.fade_bar = seen["bar"], seen["fade_bar"]
         sig.confidence, sig.credit = stated, 0.0
@@ -580,7 +602,9 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
 # ---------- records ----------
 
 def _resolved_query(db: Session, agent_id: str, horizon: str | None, since: dt.datetime | None):
-    q = db.query(Signal).filter(Signal.agent_id == agent_id, Signal.result.in_(("right", "wrong", "flat")))
+    # Every call that took a stake in the betting account and has closed: scored ones, flats, and priced
+    # calls that went unfilled (their stake only comes back, like a flat's).
+    q = db.query(Signal).filter(Signal.agent_id == agent_id, Signal.result.in_(("right", "wrong", "flat", "unfilled")))
     if horizon:
         q = q.filter(Signal.horizon == horizon)
     if since:
@@ -605,11 +629,12 @@ def _window(s: Signal) -> tuple[dt.datetime, dt.datetime]:
 
 
 def _pending_query(db: Session, agent_id: str, horizon: str | None):
-    """The agent's calls still open, whose stakes are out. A priced call the room has already left
-    unfilled takes no stake."""
-    q = db.query(Signal).filter(Signal.agent_id == agent_id, Signal.resolved_at.is_(None),
-                                Signal.fill.is_distinct_from("unfilled"))
-    return q.filter(Signal.horizon == horizon) if horizon else q
+    """The agent's calls still open, whose stakes are out. Every open call counts, filled or not: whether
+    an open priced call filled is sealed, so it must not show in the agent's public record either. An
+    unfilled call's stake simply comes back when its market closes."""
+    q = db.query(Signal).filter(Signal.agent_id == agent_id, Signal.resolved_at.is_(None))
+    q = q.filter(Signal.horizon == horizon) if horizon else q
+    return q.order_by(Signal.submitted_at, Signal.id)
 
 
 def _record(rows: list[Signal], slices: int = 1, now: dt.datetime | None = None, competitors: int = 1,

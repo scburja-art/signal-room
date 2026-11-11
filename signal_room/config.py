@@ -41,6 +41,7 @@ PRICED_MIN_PRICE = 0.05
 PRICED_MAX_PRICE = 0.95
 PRICED_MIN_SECONDS_LEFT = 60
 PRICED_FILL_WAIT_SECONDS = 1800   # a priced call whose price still cannot be established this long after its post is void
+PRICED_ODD_RESULT_SECONDS = 3600  # a result that is neither yes nor no must still read that way this long after the close to void the call
 
 RATE_LIMIT_PER_MINUTE = 60
 REGISTRATIONS_PER_HOUR = 20   # completed registrations; interim brake on free starter credits until membership gates registration

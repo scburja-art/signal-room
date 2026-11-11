@@ -123,8 +123,10 @@ def test_the_control_buys_all_four_favourites_and_can_earn_nothing(client, sessi
     assert (sealed(rows["BTC"])["side"], sealed(rows["BTC"])["limit"], sealed(rows["BTC"])["confidence"]) == ("yes", 0.72, None)
     assert (sealed(rows["ETH"])["side"], sealed(rows["ETH"])["limit"]) == ("no", 0.78)
     assert sealed(rows["XRP"])["limit"] == 0.95                                       # never bids above the ceiling
-    assert (rows["BTC"].fill, sealed(rows["BTC"])["fill"]["bar"], rows["ETH"].fill, sealed(rows["ETH"])["fill"]["bar"]) == ("filled", 0.72, "filled", 0.78)
-    assert (rows["XRP"].fill, sealed(rows["XRP"])["fill"]["reason"]) == ("unfilled", "price outside 5c-95c")
+    fills = {pair: sealed(r)["fill"] for pair, r in rows.items()}
+    assert (fills["BTC"]["status"], fills["BTC"]["bar"], fills["ETH"]["status"], fills["ETH"]["bar"]) == ("filled", 0.72, "filled", 0.78)
+    assert (fills["XRP"]["status"], fills["XRP"]["reason"]) == ("unfilled", "price outside 5c-95c")
+    assert {r.fill for r in rows.values()} == {"decided"}                             # the open rows say only that
     s.close()
     for ticker, result in (("KXBTC15M-26NOV111345-45", "yes"), ("KXETH15M-26NOV111345-45", "yes"), ("KXSOL15M-26NOV111345-45", "no")):
         venue.settle(ticker, result)
@@ -172,9 +174,9 @@ def test_a_fresh_bet_becomes_a_priced_call_under_the_new_name(client, session_fa
     assert posted == {f"1@{bet()['timestamp']}"} and list(made) == ["crypto-first-minute"]
     s = session_factory()
     row = s.query(Signal).one()
-    assert (row.kind, row.market, row.fill, row.bar) == ("priced", XRP, "filled", None)   # the cost stays sealed while open
+    assert (row.kind, row.market, row.fill, row.bar) == ("priced", XRP, "decided", None)   # fill and cost stay sealed while open
     assert {k: sealed(row)[k] for k in ("side", "limit", "confidence")} == {"side": "no", "limit": 0.85, "confidence": 0.90}
-    assert sealed(row)["fill"]["bar"] == 0.86
+    assert (sealed(row)["fill"]["status"], sealed(row)["fill"]["bar"]) == ("filled", 0.86)
     s.close()
     assert bridge.handle(bet(), now, started, posted, client_for) is False    # already posted: nothing happens
     s = session_factory()
@@ -266,3 +268,67 @@ def test_a_transient_refusal_is_retried_and_a_permanent_one_is_not():
             raise ConnectionError("server restarting")
     posted = set()
     assert bridge.handle(bet(), now, started, posted, lambda s: Broken()) is True and posted == set()
+
+
+# ---------- second review, 2026-11-11 ----------
+
+def test_slow_posts_do_not_carry_the_control_past_its_deadline(client, session_factory, venue, clock):
+    """Each post takes 40 s. The time is looked at before every coin, so only the coins that can still be
+    bought on time are; the rest are missed."""
+    four_markets(venue)
+    t = FakeTime(W + 90)
+
+    class Slow(RoomClient):
+        def post_priced(self, *a, **k):
+            t.now += 40
+            return super().post_priced(*a, **k)
+    assert fav.run_slot(Slow(Agent(client, fav.NAME)), W, venue.client(), clock=t) == 2    # at 90 s and 130 s; 170 s is too late
+    s = session_factory()
+    assert s.query(Signal).count() == 2
+    s.close()
+
+
+def test_a_timeout_on_one_coin_does_not_cost_the_others_their_turn(client, session_factory, venue, clock):
+    four_markets(venue)
+    calls = []
+
+    class Flaky(RoomClient):
+        def post_priced(self, market, *a, **k):
+            calls.append(market)
+            if "BTC" in market:
+                raise TimeoutError("no answer")
+            return super().post_priced(market, *a, **k)
+    assert fav.run_slot(Flaky(Agent(client, fav.NAME)), W, venue.client(), now=W + 90) == 3 and len(calls) == 4
+
+
+def test_the_bridge_survives_odd_bets_and_odd_state(tmp_path):
+    started = T0.replace(tzinfo=dt.timezone.utc)
+    now = (T0 + dt.timedelta(seconds=90)).replace(tzinfo=dt.timezone.utc)
+    posted, posts = set(), []
+
+    class Recorder:
+        def post_priced(self, *a):
+            posts.append(a)
+            return {"fill": "filled", "signal_id": "x"}
+    go = lambda b: bridge.handle(b, now, started, posted, lambda s: Recorder())
+    assert go(bet(1, ticker=12345)) is False and go(bet(2, ticker=["KXBTC15M"])) is False     # a ticker that is not text
+    assert go(bet(3, at=T0 + dt.timedelta(minutes=10))) is False                              # stamped ten minutes in the future
+    assert posts == [] and len(posted) == 3
+    f = tmp_path / "posted.json"
+    for text in ("7", "[[1, 2], [3]]", '{"a": 1}', "not json"):
+        f.write_text(text)
+        assert isinstance(bridge.load_posted(str(f)), set)
+
+
+def test_the_wait_before_a_retry_runs_from_the_end_of_the_failed_try():
+    started = T0.replace(tzinfo=dt.timezone.utc)
+    t = [(T0 + dt.timedelta(seconds=90)).replace(tzinfo=dt.timezone.utc)]
+
+    class Hangs:
+        def post_priced(self, *a):
+            t[0] += dt.timedelta(seconds=15)                                 # the post hangs 15 s, then fails
+            raise ConnectionError("no answer")
+    posted, holdoff = set(), {}
+    assert bridge.handle(bet(), lambda: t[0], started, posted, lambda s: Hangs(), holdoff) is True
+    (until,) = holdoff.values()
+    assert until == t[0] + dt.timedelta(seconds=bridge.RETRY_SECONDS)        # five seconds after the failure, not before it

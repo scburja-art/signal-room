@@ -270,7 +270,7 @@ def test_a_price_kalshi_never_showed_is_caught_even_if_the_room_was_consistent(c
     filled, day, _ = priced_day(client, session_factory, venue, clock)
     s = session_factory()
     sig = s.get(Signal, filled)
-    sig.fill_ask, sig.bar = 0.60, 0.62
+    sig.fill_ask, sig.bar, sig.net_return = 0.60, 0.62, 0.38            # a cheaper price, and everything that follows from it
     body = service.unseal(sig.agent_id, sig.body_cipher)
     sig.leaf = priced_leaf(sig.hash, body["salt"], service.fill_record(sig, body))
     s.commit()
@@ -419,3 +419,136 @@ def test_the_checker_has_its_own_copy_of_the_fee_and_the_fill_rule():
     for ask, size, limit, left in ((None, 50, 0.5, 600), (0.5, 50, 0.5, 59), (0.96, 50, 0.99, 600), (0.04, 50, 0.5, 600),
                                    (0.51, 50, 0.5, 600), (0.5, 9, 0.5, 600), (0.5, 10, 0.5, 60), (0.95, 10, 0.95, 600)):
         assert verify.fill_rule(ask, size, limit, left) == service.decide_fill(ask, size, limit, left)
+
+
+# ---------- more consistent lies, and honest rooms that must not be failed (second review, 2026-11-11) ----------
+
+def test_a_filled_loser_rewritten_as_nothing_on_offer_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "yes")
+    rewrite(session_factory, sid, fill="unfilled", fill_reason="nothing on offer", fill_ask=None, fill_bid=None, bar=None,
+            fade_bar=None, result="unfilled", brier=None, credit=0.0, net_return=None, venue_result=None)
+    caught(client, session_factory, "recorded as nothing on offer; Kalshi shows offers of 0.84 to 0.9 throughout")
+
+
+def test_a_bid_erased_to_dodge_the_worse_than_chance_test_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "no")
+    rewrite(session_factory, sid, fill_bid=None, fade_bar=0.0)
+    caught(client, session_factory, "recorded with no bid; Kalshi shows bids of")
+
+
+def test_a_score_changed_after_anchoring_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "no")
+    day, chain = anchor(session_factory)
+    s = session_factory()
+    s.get(Signal, sid).brier = 0.0                                       # not in the leaf; it must follow from the rest
+    s.commit()
+    s.close()
+    r = check(client, day, chain)
+    assert not r["ok"] and "Brier recorded as 0.0" in r["venue_mismatched"][0]
+
+
+def history_call(client, factory, venue, clock, result_at_kalshi, volume=5000.0):
+    """One call the room could not read live, filled from Kalshi's record of its minute (NO up to 90c)."""
+    no_at_85(venue)
+    venue.down = True
+    sid = call(Agent(client, "author"), limit=0.95, confidence=0.97).json()["signal_id"]
+    venue.down = False
+    venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.10, 0.16), yes_ask=(0.11, 0.17), volume=volume)
+    close_market(venue, clock, factory, result_at_kalshi)
+    return sid
+
+
+def test_an_honest_fill_from_history_verifies(client, session_factory, venue, clock):
+    history_call(client, session_factory, venue, clock, "no")
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert r["ok"] and r["venue_checked"] == 1, r["venue_mismatched"]
+
+
+def test_a_history_fill_relabelled_too_thin_is_caught_by_the_minute_s_volume(client, session_factory, venue, clock):
+    sid = history_call(client, session_factory, venue, clock, "yes")     # filled at 90c, and lost
+    rewrite(session_factory, sid, fill="unfilled", fill_reason="under 10 on offer", fill_size=3.0, bar=None, fade_bar=None,
+            result="unfilled", brier=None, credit=0.0, net_return=None, venue_result=None)
+    caught(client, session_factory, "recorded 3.0 contracts traded that minute, Kalshi's record says 5000.00")
+
+
+def test_a_loser_voided_as_unreadable_while_other_calls_were_being_read_is_caught(client, session_factory, venue, clock):
+    no_at_85(venue)
+    venue.add_market(BTC, T0, yes_bid=0.15, yes_ask=0.16)
+    venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.10, 0.16), yes_ask=(0.11, 0.17))
+    venue.add_minute(BTC, T0 + dt.timedelta(minutes=2), yes_bid=(0.10, 0.16), yes_ask=(0.11, 0.17))
+    author = Agent(client, "author")
+    loser = call(author).json()["signal_id"]
+    clock.to(seconds=95)
+    call(author, market=BTC)                                             # read live five seconds later
+    venue.settle(BTC, "no")
+    close_market(venue, clock, session_factory, "yes")
+    s = session_factory()
+    sig = s.get(Signal, loser)                                           # "we never got a price for that one"
+    sig.fill = sig.fill_at = sig.fill_source = sig.fill_ask = sig.fill_bid = sig.fill_size = sig.bar = sig.fade_bar = None
+    sig.leaf, sig.result, sig.brier, sig.credit, sig.net_return, sig.venue_result = None, "void", None, 0.0, None, None
+    s.commit()
+    s.close()
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert not r["ok"] and any("voided for want of a price, though the room read Kalshi live" in m for m in r["venue_mismatched"])
+
+
+def test_a_call_honestly_voided_for_want_of_a_price_is_flagged_not_failed(client, session_factory, venue, clock):
+    no_at_85(venue)
+    venue.down = True
+    call(Agent(client, "author"))
+    s = session_factory()
+    service.resolve_due(s, clock.to(minutes=32))                         # Kalshi stayed down: void after half an hour
+    s.close()
+    venue.down = False
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert r["ok"] and r["venue_unseen"] == 1 and "⚠ Kalshi: 1 priced calls were voided for want of a price" in verify.report(r)
+
+
+def test_a_slow_honest_read_that_crosses_into_the_next_minute_verifies(client, session_factory, venue, clock, monkeypatch):
+    """Stamped at 18:31:57; Kalshi answered eight seconds later, in the next minute, at that minute's price."""
+    no_at_85(venue)
+    clock.to(minutes=1, seconds=57)
+    ticks = iter([clock.t, clock.t, clock.t, clock.t + dt.timedelta(seconds=8)])
+    last = [clock.t + dt.timedelta(seconds=8)]
+    monkeypatch.setattr(service, "utcnow", lambda: next(ticks, last[0]))
+    out = call(Agent(client, "author")).json()
+    assert out["fill"] == "filled"
+    monkeypatch.setattr(service, "utcnow", clock)
+    # Kalshi's history: NO at 60c to 70c in the minute of the stamp, 84c to 90c in the minute the answer came.
+    venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.30, 0.40), yes_ask=(0.31, 0.41))
+    venue.add_minute(XRP, T0 + dt.timedelta(minutes=3), yes_bid=(0.10, 0.16), yes_ask=(0.11, 0.17))
+    close_market(venue, clock, session_factory, "no")
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert r["ok"], r["venue_mismatched"]
+
+
+def test_kalshi_s_own_oddities_leave_the_day_unfinished_not_failed(client, session_factory, venue, clock):
+    one_call(client, session_factory, venue, clock, "no")
+    day, chain = anchor(session_factory)
+    del venue.candles[XRP][-1]["yes_ask"]                                # Kalshi's minute record lost a price
+    r = check(client, day, chain)
+    assert r["intact"] and not r["ok"] and r["venue_unreachable"] == 1 and not r["venue_mismatched"]
+    assert "NOT YET" in verify.report(r)
+    del venue.markets[XRP]                                               # Kalshi no longer serves the market at all
+    r = check(client, day, chain, sample=None)                           # (a second outsider)
+    assert r["intact"] and not r["ok"] and r["venue_unreachable"] == 1 and "NOT YET" in verify.report(r)
+
+
+def test_kalshi_moving_a_close_by_seconds_does_not_fail_an_honest_room(client, session_factory, venue, clock):
+    one_call(client, session_factory, venue, clock, "no")
+    day, chain = anchor(session_factory)
+    venue.markets[XRP]["close_time"] = "2026-11-11T18:44:57Z"            # three seconds earlier than when the call was filled
+    assert check(client, day, chain)["ok"]
+
+
+def test_a_clean_day_not_yet_anchored_reads_not_yet(client, session_factory, venue, clock):
+    one_call(client, session_factory, venue, clock, "no")
+    day = T0.date().isoformat()
+    r = verify.verify_day(ApiClient(Agent(client, "outsider")), day, chain=lambda tx: {"found": False}, pause=0,
+                          now=T0 + dt.timedelta(days=1))
+    text = verify.report(r)
+    assert not r["ok"] and "NOT YET: this day has not been anchored" in text and "✘" not in text

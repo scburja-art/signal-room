@@ -192,8 +192,8 @@ def test_nothing_about_an_open_priced_call_gives_its_side_away(client, session_f
         assert not any(k in public for k in secrets), public
     assert day["start_at"] is None and day["leaf"] != day["hash"]
     line = next(r.getMessage() for r in caplog.records if "EVENT" in r.getMessage())
-    assert '"kind": "priced"' in line and '"fill": "filled"' in line
-    assert not any(w in line for w in ('"side"', "0.85", "0.86", '"no"'))
+    assert '"kind": "priced"' in line and '"fill": "decided"' in line          # that a decision was made, never which
+    assert not any(w in line for w in ('"side"', "0.85", "0.86", '"no"', "filled"))
     # Its author sees its own call in full; a paying reader does too.
     mine = author.get("/me").json()["signals"][0]
     assert mine["side"] == "no" and mine["limit"] == 0.85 and mine["fill"]["bar"] == 0.86
@@ -300,7 +300,8 @@ def test_example_7_fill_from_the_worst_price_of_the_minute(client, session_facto
     venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.07, 0.36), yes_ask=(0.09, 0.39), volume=20333.0)
     assert service.fill_waiting(s, clock.to(minutes=3)) == 1
     sig = s.get(Signal, first.json()["signal_id"])
-    assert (sig.fill, sig.fill_source, seen(sig)["reason"], seen(sig)["ask"]) == ("unfilled", "history", "price above the limit", 0.93)
+    assert (sig.fill, sig.fill_source) == ("decided", "history")           # the open row does not say which way it went
+    assert (seen(sig)["status"], seen(sig)["reason"], seen(sig)["ask"]) == ("unfilled", "price above the limit", 0.93)
     assert sig.resolve_at == T0 + dt.timedelta(minutes=15) and service.day_ready_to_anchor(s, T0.date())
     s.close()
 
@@ -328,7 +329,7 @@ def test_history_with_almost_nothing_traded_does_not_fill(client, session_factor
     venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.14, 0.16), yes_ask=(0.15, 0.17), volume=4.0)
     s = session_factory()
     assert service.fill_waiting(s, clock.to(minutes=3)) == 1
-    assert (s.get(Signal, sid).fill, seen(s.get(Signal, sid))["reason"]) == ("unfilled", "under 10 on offer")
+    assert (seen(s.get(Signal, sid))["status"], seen(s.get(Signal, sid))["reason"]) == ("unfilled", "under 10 on offer")
     s.close()
 
 
@@ -383,7 +384,7 @@ def test_a_market_that_never_existed_is_closed_out_unfilled(client, session_fact
     venue.down = False
     s = session_factory()
     assert service.fill_waiting(s, clock.to(minutes=3)) == 1
-    assert (s.get(Signal, sid).fill, seen(s.get(Signal, sid))["reason"]) == ("unfilled", "no such market")
+    assert (seen(s.get(Signal, sid))["status"], seen(s.get(Signal, sid))["reason"]) == ("unfilled", "no such market")
     service.resolve_due(s, clock.to(minutes=20))
     assert s.get(Signal, sid).result == "unfilled"
     s.close()
@@ -429,15 +430,120 @@ def test_no_price_is_void_after_half_an_hour_and_no_result_after_72_hours(client
     s.close()
 
 
-def test_a_result_that_is_not_yes_or_no_is_void_at_once(client, session_factory, venue, clock):
+def test_a_result_that_is_not_yes_or_no_voids_the_call_once_it_has_stood_an_hour(client, session_factory, venue, clock):
     no_at_85(venue)
     a = Agent(client, "bot")
     sid = call(a).json()["signal_id"]
     venue.settle(XRP, "scalar")
     s = session_factory()
-    assert service.resolve_due(s, clock.to(minutes=16)) == 1 and s.get(Signal, sid).result == "void"
-    assert s.get(Signal, sid).credit == 0.0                            # it can never be scored, so it does not hold the coin
+    assert service.resolve_due(s, clock.to(minutes=16)) == 0            # one odd answer is not the last word
+    assert service.resolve_due(s, clock.to(minutes=80)) == 1 and s.get(Signal, sid).result == "void"
+    assert s.get(Signal, sid).credit == 0.0
     s.close()
+
+
+def test_an_odd_result_that_kalshi_then_corrects_is_scored(client, session_factory, venue, clock):
+    no_at_85(venue)
+    sid = call(Agent(client, "bot")).json()["signal_id"]
+    venue.settle(XRP, "")                                              # finalised, result blank for a moment
+    s = session_factory()
+    assert service.resolve_due(s, clock.to(minutes=16)) == 0
+    venue.settle(XRP, "no")
+    assert service.resolve_due(s, clock.to(minutes=17)) == 1 and s.get(Signal, sid).result == "right"
+    s.close()
+
+
+def test_a_filled_call_is_never_voided_because_kalshi_could_not_be_reached(client, session_factory, venue, clock):
+    """Review finding 2026-11-11: a machine off for more than 72 hours, whose first tick ran before the
+    network was back, voided a filled call for good; a minute later Kalshi said it had won."""
+    no_at_85(venue)
+    sid = call(Agent(client, "bot")).json()["signal_id"]
+    venue.settle(XRP, "no")
+    venue.down = True
+    s = session_factory()
+    assert service.resolve_due(s, clock.to(hours=80)) == 0 and s.get(Signal, sid).resolved_at is None
+    venue.down = False
+    assert service.resolve_due(s, clock.to(hours=80, minutes=1)) == 1 and s.get(Signal, sid).result == "right"
+    s.close()
+
+
+def test_one_market_that_keeps_failing_does_not_hold_up_the_others(client, session_factory, venue, clock, monkeypatch):
+    """Review finding 2026-11-11: Kalshi answering 500 for one market stopped every other settlement."""
+    import httpx
+    coins = ("BTC", "ETH", "SOL", "XRP")
+    a = Agent(client, "bot")
+    for coin in coins:
+        venue.add_market(f"KX{coin}15M-26NOV111345-45", T0, yes_bid=0.15, yes_ask=0.16)
+        assert call(a, market=f"KX{coin}15M-26NOV111345-45").status_code == 201
+    for coin in coins:
+        venue.settle(f"KX{coin}15M-26NOV111345-45", "no")
+    real = venue.__call__
+    monkeypatch.setattr(kalshi, "_http", httpx.Client(transport=httpx.MockTransport(
+        lambda r: httpx.Response(500, json={}) if "KXBTC15M" in r.url.path else real(r))))
+    s = session_factory()
+    assert service.resolve_due(s, clock.to(minutes=16)) == 3
+    assert {x.pair: x.result for x in s.query(Signal)} == {"BTC": None, "ETH": "right", "SOL": "right", "XRP": "right"}
+    s.close()
+
+
+def test_a_waiting_call_gives_up_on_time_whatever_goes_wrong(client, session_factory, venue, clock, monkeypatch):
+    """Review finding 2026-11-11: an answer that raised something unexpected fired before the half-hour
+    deadline on every tick; the call waited for good and no later day could be anchored."""
+    no_at_85(venue)
+    venue.down = True
+    sid = call(Agent(client, "bot")).json()["signal_id"]
+    venue.down = False
+    monkeypatch.setattr(kalshi, "fetch_minute", lambda *a, **k: (_ for _ in ()).throw(AttributeError("odd shape")))
+    s = session_factory()
+    assert service.resolve_due(s, clock.to(minutes=20)) == 0 and s.get(Signal, sid).resolved_at is None
+    assert service.resolve_due(s, clock.to(minutes=32)) == 1 and s.get(Signal, sid).result == "void"
+    assert service.day_ready_to_anchor(s, T0.date())
+    s.close()
+
+
+def test_a_call_posted_after_the_close_during_an_outage_goes_unfilled_at_once(client, session_factory, venue, clock):
+    no_at_85(venue)
+    clock.to(minutes=15, seconds=30)                                   # the market closed half a minute ago
+    venue.down = True
+    sid = call(Agent(client, "bot")).json()["signal_id"]
+    venue.down = False
+    s = session_factory()
+    assert service.fill_waiting(s, clock.to(minutes=17)) == 1          # no minute record needed to know that
+    assert seen(s.get(Signal, sid))["reason"] == "market was not open"
+    s.close()
+
+
+def test_odd_answers_about_the_fee_rule_refuse_the_call(client, session_factory, venue, clock):
+    no_at_85(venue)
+    a = Agent(client, "bot")
+    for odd in (True, "1", None, 1.5):
+        venue.series["KXXRP15M"]["fee_multiplier"] = odd
+        kalshi._series_ok.clear()
+        assert call(a).status_code == 503
+    venue.series["KXXRP15M"] = ["not", "a", "record"]
+    assert call(a).status_code == 503
+    s = session_factory()
+    assert s.query(Signal).count() == 0
+    s.close()
+
+
+def test_whether_an_open_call_filled_does_not_show_in_the_public_record(client, session_factory, venue, clock):
+    """Review finding 2026-11-11: an unfilled call took no stake in the betting account, so another agent
+    could read from the author's luck odds whether its open call had filled, which on a one-sided market
+    says the side."""
+    records = []
+    for limit in (0.85, 0.80):                                         # NO is at 85c: the first fills, the second does not
+        ticker = f"KXXRP15M-26NOV111345-{len(records)}"
+        venue.add_market(ticker, T0, yes_bid=0.15, yes_ask=0.16)
+        author, other = Agent(client, f"author{limit}"), Agent(client, f"other{limit}")
+        assert call(author, market=ticker, limit=limit, confidence=0.9).json()["fill"] == ("filled" if limit == 0.85 else "unfilled")
+        public = other.get(f"/agents/{author.id}").json()
+        records.append({k: v for k, v in public.items() if k not in ("agent_id", "name", "since")})
+        s = session_factory()
+        open_row = s.query(Signal).filter_by(agent_id=author.id).one()
+        assert (open_row.fill, open_row.start_at is not None, open_row.bar) == ("decided", True, None)
+        s.close()
+    assert records[0] == records[1]
 
 
 def test_one_unreachable_read_ends_the_asking_for_that_tick(client, session_factory, venue, clock):

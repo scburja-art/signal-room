@@ -36,8 +36,12 @@ class VenueError(Exception):
 
 
 class VenueUnreachable(VenueError):
-    """Kalshi could not be read just now: no connection, a timeout, a busy or failing server. The same
-    read may well work in a minute."""
+    """Kalshi could not be read just now: a busy or failing server, a refusal. The same read may well
+    work in a minute."""
+
+
+class VenueOffline(VenueUnreachable):
+    """No answer at all: no connection, or a timeout. Asking for the next market would only wait again."""
 
 
 class NoSuchMarket(VenueError):
@@ -51,7 +55,7 @@ class NoResult(VenueError):
 def parse_ticker(ticker: str) -> tuple[str, str, str] | None:
     """(series, pair, horizon) for a market the room reads, else None. KXBTC15M-26NOV111345-45 →
     ('KXBTC15M', 'BTC', '15m')."""
-    m = _TICKER.match(ticker or "")
+    m = _TICKER.match(ticker) if isinstance(ticker, str) else None
     return (m.group(1), m.group(2), "15m") if m else None
 
 
@@ -96,7 +100,7 @@ def _get(path: str, params: dict | None = None, http: httpx.Client | None = None
     try:
         r = (http or _client()).get(BASE_URL + path, params=params, **({"timeout": timeout} if timeout else {}))
     except httpx.HTTPError as e:
-        raise VenueUnreachable(f"could not reach Kalshi: {type(e).__name__}") from e
+        raise VenueOffline(f"could not reach Kalshi: {type(e).__name__}") from e
     if r.status_code == 404:
         raise NoSuchMarket(path)
     if r.status_code != 200:
@@ -136,9 +140,12 @@ def _count(value) -> float:
 
 def _time(value) -> dt.datetime:
     try:
-        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(dt.timezone.utc).replace(tzinfo=None)
+        t = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError as e:
         raise VenueError(f"not a time: {value!r}") from e
+    if t.tzinfo is None:        # a time with no zone could be anyone's clock: refused, not guessed
+        raise VenueError(f"a time with no zone: {value!r}")
+    return t.astimezone(dt.timezone.utc).replace(tzinfo=None)
 
 
 def fetch_market(ticker: str, http: httpx.Client | None = None, timeout: float | None = None) -> dict:
@@ -182,7 +189,9 @@ def quote(market: dict, side: str) -> Quote:
 def result(market: dict) -> str | None:
     """'yes' or 'no' once Kalshi has finalised the market, None while it has not. A finalised market
     with any other result can never be scored and raises NoResult."""
-    if market.get("status") != "finalized":
+    if not isinstance(market, dict) or not isinstance(market.get("status"), str):
+        raise VenueError("Kalshi's market record has no status")
+    if market["status"] != "finalized":
         return None
     res = market.get("result")
     if res not in ("yes", "no"):
@@ -213,6 +222,8 @@ def fetch_minute(ticker: str, at: dt.datetime, http: httpx.Client | None = None)
             candles = _get(f"/historical/markets/{ticker}/candlesticks", params, http).get("candlesticks")
         except NoSuchMarket:
             candles = None
+    if candles is not None and not isinstance(candles, list):
+        raise VenueError("Kalshi's minute records are not a list")
     for c in candles or []:
         if isinstance(c, dict) and c.get("end_period_ts") == end:
             return c
@@ -226,7 +237,7 @@ def minute_range(candle: dict, side: str) -> tuple[float, float, float, float]:
         yb_lo, yb_hi = _dollars(candle["yes_bid"]["low_dollars"]), _dollars(candle["yes_bid"]["high_dollars"])
         ya_lo, ya_hi = _dollars(candle["yes_ask"]["low_dollars"]), _dollars(candle["yes_ask"]["high_dollars"])
         volume = _count(candle["volume_fp"])
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, IndexError) as e:
         raise VenueError("Kalshi's minute record is missing a price") from e
     if side == "yes":
         return ya_lo, ya_hi, yb_lo, volume
@@ -238,9 +249,12 @@ def minute_range(candle: dict, side: str) -> tuple[float, float, float, float]:
 def open_market(series: str, now: dt.datetime, http: httpx.Client | None = None) -> dict | None:
     """The market of this series that is trading at `now`, or None between windows."""
     body = _get("/markets", {"series_ticker": series, "status": "open", "limit": 5}, http)
-    for m in body.get("markets") or []:
+    markets = body.get("markets") or []
+    if not isinstance(markets, list):
+        raise VenueError("Kalshi's list of markets is not a list")
+    for m in markets:
         try:
-            if m.get("status") == "active" and _time(m["open_time"]) <= now < _time(m["close_time"]):
+            if isinstance(m, dict) and m.get("status") == "active" and _time(m["open_time"]) <= now < _time(m["close_time"]):
                 return m
         except (KeyError, VenueError):
             continue
@@ -263,16 +277,19 @@ def check_fee_rule(series: str, http: httpx.Client | None = None) -> None:
     if seen is not None and 0 <= now - seen < SERIES_CHECK_SECONDS:
         return
     try:
-        s = _get(f"/series/{series}", http=http).get("series") or {}
+        s = _get(f"/series/{series}", http=http).get("series")
     except VenueUnreachable:
         if seen is not None and 0 <= now - seen < 24 * 3600:
             return
         raise
     except NoSuchMarket as e:
         raise VenueError(f"Kalshi has no series {series}") from e
-    if s.get("fee_type") != "quadratic" or s.get("fee_multiplier") != 1:
+    if not isinstance(s, dict):
+        raise VenueError(f"Kalshi's record of {series} cannot be read")
+    mult = s.get("fee_multiplier")
+    if s.get("fee_type") != "quadratic" or isinstance(mult, bool) or not isinstance(mult, (int, float)) or mult != 1:
         with _series_lock:
             _series_ok.pop(series, None)
-        raise VenueError(f"{series} fee rule changed: {s.get('fee_type')!r} x {s.get('fee_multiplier')!r}")
+        raise VenueError(f"{series} fee rule changed: {s.get('fee_type')!r} x {mult!r}")
     with _series_lock:
         _series_ok[series] = now

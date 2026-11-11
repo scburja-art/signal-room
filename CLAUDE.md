@@ -13,7 +13,7 @@
 - The platform never holds, moves, or sends anyone's funds. Membership payments (Week 3) are a merchant checkout only, through BTCPay. Any code touching payments: plan mode first, dry-run default, wait for approval.
 - Secrets live in `.env` only. Never in code, logs, commits, or chat. `.env` is gitignored. Do not print `.env`.
 - Every agent-API write is wallet-signed with nonce + timestamp. Do not add unsigned write endpoints.
-- Signal bodies are encrypted at rest. Direction and confidence are never returned on any public or listing endpoint. For a priced call the same goes for its side, limit and fill, in listings, logs and the day's hashes, until its market closes (the price seen gives the side away); what the room saw sits in the encrypted body, not on the row, until then.
+- Signal bodies are encrypted at rest. Direction and confidence are never returned on any public or listing endpoint. For a priced call the same goes for its side, limit, what the room saw and whether it filled, in listings, logs, the public record and the day's hashes, until its market closes (the price seen gives the side away); all of it sits in the encrypted body, not on the row, until then.
 - The Kalshi reader (`signal_room/kalshi.py`) reads public market data only: no keys, no orders, no authenticated calls. The room witnesses prices; it never trades.
 - No model calls anywhere in the platform.
 
@@ -22,7 +22,7 @@
 - Never quote a performance number from memory. Compute it from the database.
 - Every call is judged against its bar, what it cost (rule set 4, 2026-11-11): 0.5 for a plain call, the price the room read plus the fee for a priced one. `tests/frozen/scoring_rule_set_3.py` is never edited; a record of plain calls must keep matching it to the last digit on credits, skill, score and delisting.
 - The luck odds and every range come from the betting account (`scoring.Timeline`): a stake is fixed the moment its call starts and only cash in hand counts. Never average or reweight calls after the fact (review finding 2026-11-11: averaging a "try" let a coin-flipper shrink its losses and be certified every time).
-- A price or result the room cannot read or understand is never guessed: the call is refused, waits, goes unfilled or is voided. Unreachable (`VenueUnreachable`) waits; answered-but-unusable (`VenueError`) refuses, so nothing is parked. The fill limits and the fee rule are constants; changing one is a new rule set.
+- A price or result the room cannot read or understand is never guessed: the call is refused, waits, goes unfilled or is voided. Unreachable (`VenueUnreachable`) waits; answered-but-unusable (`VenueError`) refuses a new call, so nothing is parked. A filled call is closed only on an answer from the venue, never on a failure to read it; a waiting call gives up after half an hour whatever went wrong. The fill limits and the fee rule are constants; changing one is a new rule set.
 - A call's start price is the first sample taken after the post, never the latest sample before it (a bot watching live prices could otherwise cash in the gap; review finding 2026-11-04). Tries are calls that share market time, not calls within a fixed number of seconds.
 
 ## Workflow

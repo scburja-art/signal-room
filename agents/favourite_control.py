@@ -54,16 +54,19 @@ def next_window(now: float, done: int | None) -> int:
     return w
 
 
-def run_slot(client: SignalRoomClient, w: int, http=None, now: float | None = None) -> int:
+def run_slot(client: SignalRoomClient, w: int, http=None, now: float | None = None, clock=None) -> int:
     """One window: one priced call per coin on that window's market. Returns how many were accepted.
-    now: the real time (unix seconds); past TOO_LATE in the window nothing is posted."""
-    now = w + ACT_AT if now is None else now
-    if not (w <= now <= w + TOO_LATE):
-        log.info("window %s missed: %.0f s in, too late to act as the yardstick", time.strftime("%H:%M", time.gmtime(w)), now - w)
-        return 0
+    The time is looked at before every coin (clock: a function giving unix seconds; now: a fixed time,
+    for tests); past TOO_LATE in the window nothing more is posted, however slow the earlier posts were."""
+    clock = clock or ((lambda: now) if now is not None else (lambda: w + ACT_AT))
     posted = 0
-    at = dt.datetime.fromtimestamp(now, dt.timezone.utc).replace(tzinfo=None)
     for pair, series in SERIES.items():
+        t = clock()
+        if not (w <= t <= w + TOO_LATE):
+            log.info("window %s: %.0f s in, too late to act as the yardstick; %s and any coins after it are missed",
+                     time.strftime("%H:%M", time.gmtime(w)), t - w, pair)
+            break
+        at = dt.datetime.fromtimestamp(t, dt.timezone.utc).replace(tzinfo=None)
         try:
             market = kalshi.open_market(series, at, http)
             choice = pick(market) if market else None
@@ -83,6 +86,8 @@ def run_slot(client: SignalRoomClient, w: int, http=None, now: float | None = No
                 log.info("%s: open signal still pending", pair)
             else:
                 log.warning("%s: %s", pair, e)
+        except Exception as e:   # a timeout on one coin must not cost the others their turn
+            log.warning("%s: post failed (%s)", pair, type(e).__name__)
     return posted
 
 
@@ -92,7 +97,7 @@ def step(client: SignalRoomClient, done: int | None, clock=time.time, sleep=time
     w = next_window(clock(), done)
     sleep(max(0.0, w + ACT_AT - clock()))
     try:
-        run_slot(client, w, now=clock())
+        run_slot(client, w, clock=clock)
     except Exception as e:   # server restart, network blip: skip the slot, keep the schedule
         log.warning("slot %s failed (%s)", time.strftime("%H:%M", time.gmtime(w)), type(e).__name__)
     return w

@@ -44,7 +44,7 @@ LINE = re.compile(r"^\d{4}-\d\d-\d\d (\d\d):(\d\d):\d\d,\d+ (\w+) ([\w.]+): (.*)
 HIDE = re.compile(
     r"still pending|already pending|will retry|HTTP/1\.1\" [234]\d\d |'resolved': \d+\}|^==> |^\s*$"
     r"|^(BTC|ETH|SOL|XRP) (long|short|yes|no) (@|posted)|^bet \S+ \[.*\] -> |^read \S+ \S+ \S+ by |nothing affordable to read"
-    r"|^priced call \S+: (history|result) not readable yet"
+    r"|^priced call \S+: Kalshi did not answer for its market"
     r"|^(Started|Waiting for|Application|Finished|Shutting down)"
 )
 
@@ -132,9 +132,9 @@ def sealed_priced(signal_id: str | None) -> dict | None:
             if not sig:
                 return None
             body = unseal(sig.agent_id, sig.body_cipher)
-            seen = body.get("fill") or {"ask": sig.fill_ask, "bar": sig.bar, "reason": sig.fill_reason}
-            return {"side": body["side"], "limit": float(body["limit"]), "ask": seen["ask"], "bar": seen["bar"],
-                    "reason": seen["reason"] or ""}
+            seen = body.get("fill") or {"status": sig.fill, "ask": sig.fill_ask, "bar": sig.bar, "reason": sig.fill_reason}
+            return {"side": body["side"], "limit": float(body["limit"]), "status": seen["status"], "ask": seen["ask"],
+                    "bar": seen["bar"], "reason": seen["reason"] or ""}
         finally:
             db.close()
     except Exception:
@@ -147,18 +147,17 @@ def call_words(side: str) -> str:
 
 
 def render_priced(e: dict, when: str, p: Painter, where: str) -> str | None:
-    """A priced call's fill, shown the moment the room decides it. The side and the price come from the
-    sealed database on this machine, never from the log line."""
-    who, fill = e.get("agent", "?"), e.get("fill")
-    if fill == "waiting":
+    """A priced call's fill, shown the moment the room decides it. The side, the price and which way the
+    fill went come from the sealed database on this machine, never from the log line, which says only
+    that a decision was made."""
+    who = e.get("agent", "?")
+    if e.get("fill") == "waiting":
         return p.row(when, who, "WAITING", YELLOW, f"{where} · Kalshi unreadable; fills at that minute's worst price")
     call = sealed_priced(e.get("signal_id"))
     if call is None:
-        state = "not filled, not scored" if fill == "unfilled" else f"sealed until {short(e['closes'])}"
-        return p.row(when, who, "NEW CALL" if fill == "filled" else "NOT FILLED", WHITE if fill == "filled" else GRAY,
-                     f"{where} · priced call on Kalshi · {state}")
+        return p.row(when, who, "NEW CALL", WHITE, f"{where} · priced call on Kalshi · sealed until {short(e['closes'])}")
     said = call_words(call["side"])
-    if fill == "filled":
+    if call["status"] == "filled":
         return p.row(when, who, "NEW CALL", WHITE,
                      f"{where} · {said} at {cents(call['ask'])}, {cents(call['bar'])} with fee · closes {short(e['closes'])}")
     if call["reason"] == "price above the limit" and call["ask"] is not None:

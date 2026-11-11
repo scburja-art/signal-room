@@ -31,8 +31,17 @@ set -a; source .env; set +a
 export PYTHONUNBUFFERED=1
 mkdir -p logs
 
+# Two rooms on one database would each score the same calls. Refuse to start a second one.
+already_running() {
+  if curl -s -m 2 "http://127.0.0.1:${SIGNAL_ROOM_PORT:-8000}/health" > /dev/null 2>&1; then
+    echo "The room is already running on port ${SIGNAL_ROOM_PORT:-8000}. Stop it first (Ctrl+C in its window), then start again."
+    exit 1
+  fi
+}
+
 case "${1:-serve}" in
   serve)
+    already_running
     ./venv/bin/python -m signal_room.main 2>&1 | tee -a logs/server.log
     ;;
   agent)
@@ -42,6 +51,7 @@ case "${1:-serve}" in
   all)
     # Server plus every seed agent in this one terminal. Each still writes its own log in logs/.
     # Ctrl+C stops all of them together. Kakalshi itself runs in its own window (its own program).
+    already_running
     KAKALSHI_LOG="${SIGNAL_ROOM_KAKALSHI_LOG:-$HOME/Stove Codes/kalshi-deep-trading-bot/kalshi-copy-bot/shadow_results.json}"
     PIDS=()
     stop_all() {
