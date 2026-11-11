@@ -260,3 +260,24 @@ def test_an_honest_bot_is_still_found(monkeypatch):
     one = sorted(windows_needed(1) or 9999 for _ in range(40))[20]
     four = sorted(windows_needed(4) or 9999 for _ in range(40))[20]
     assert one < 1200 and four < 1200
+
+
+def test_calls_starting_together_are_staked_in_the_order_they_were_posted_whichever_closes_first():
+    """Two calls start at the same instant: A (posted first, a 1-hour call) and B (posted second, 15 minutes).
+    B closes first. While A is still open it is 'pending' and comes after B in the lists, but its stake
+    must be the one fixed when the calls were made: A first, then B from what was left."""
+    # 50% stakes: A takes 0.50, B takes 0.25. B wins: cash 0.25 + 0.50 = 0.75 while A is open.
+    while_open = Timeline([(0, 15)], pending=[0], order=[("p2", "b"), ("p1", "a")])
+    assert math.exp(while_open.log_cash([1.0], 0.5)) == pytest.approx(0.75)
+    # A then loses: nothing more comes back. The account never held anything else.
+    closed = Timeline([(0, 15), (0, 60)], order=[("p2", "b"), ("p1", "a")])
+    assert math.exp(closed.log_cash([1.0, -1.0], 0.5)) == pytest.approx(0.75)
+    # Without the posting order the lists' own order would have staked B first (0.50) and shown 1.25.
+    assert math.exp(Timeline([(0, 15)], pending=[0]).log_cash([1.0], 0.5)) == pytest.approx(1.25)
+
+
+def test_record_passes_the_posting_order_through():
+    briers, results = [0.25, 0.25], ["right", "wrong"]
+    first = scoring.record(briers, results, [], windows=[(0, 15), (0, 15)], order=[1, 2])
+    second = scoring.record(briers, results, [], windows=[(0, 15), (0, 15)], order=[2, 1])
+    assert first.p_luck_alone != second.p_luck_alone or first.hit_rate_low != second.hit_rate_low

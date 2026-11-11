@@ -169,22 +169,26 @@ class Timeline:
     shrink a losing try by adding calls to it (review finding: a coin-flipper was certified every time).
 
     windows: (start, end) per closed call. pending: the start of each call still open. Calls that
-    close at an instant are paid before calls that start at it."""
+    close at an instant are paid before calls that start at it. Calls that start at the same instant
+    are staked in the order of `order` (one sortable key per call, closed then pending: the room passes
+    when each was posted), so the order is fixed when the calls are made and never depends on which of
+    them has closed; without it, in the order given."""
 
     CHUNK = 8   # events between range checks: short enough that no run of wins or losses leaves a float's range
 
-    def __init__(self, windows: list[tuple], pending: list | None = None):
+    def __init__(self, windows: list[tuple], pending: list | None = None, order: list | None = None):
         self.n = len(windows)
+        rank = {i: r for r, i in enumerate(sorted(range(len(order)), key=lambda i: (order[i], i)))} if order else {}
         events = []
         for i, (start, end) in enumerate(windows):
-            events.append((start, 1, i))
-            events.append((end, 0, i) if end > start else (start, 2, i))   # a call never closes before it starts
+            events.append((start, 1, rank.get(i, i), i))
+            events.append((end, 0, rank.get(i, i), i) if end > start else (start, 2, rank.get(i, i), i))   # never closes before it starts
         for j, start in enumerate(pending or []):
-            events.append((start, 1, self.n + j))
+            events.append((start, 1, rank.get(self.n + j, self.n + j), self.n + j))
         events.sort()
         self.size = self.n + len(pending or [])
         # i: call i starts. ~i (negative): call i closes. Cut into chunks, each with the calls open at its end.
-        order = [i if kind == 1 else ~i for _, kind, i in events]
+        order = [i if kind == 1 else ~i for _, kind, _, i in events]
         self.chunks, open_now = [], set()
         for at in range(0, len(order), self.CHUNK):
             part = order[at:at + self.CHUNK]
@@ -472,13 +476,15 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
            clusters: list | None = None, slices: int = 1, long_returns: list[float] | None = None,
            competitors: int = 1, bars: list[float | None] | None = None,
            fades: list[float | None] | None = None, windows: list[tuple] | None = None,
-           pending: list | None = None) -> Record:
+           pending: list | None = None, order: list | None = None) -> Record:
     """briers/results/clusters/windows are parallel lists over resolved signals; returns covers those
     with a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved
     under rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
     windows: each call's scored window (start, end), which sets when its stake leaves and returns to
     the betting account (see Timeline). None: the calls came one after another. A flat's stake simply
     comes back. pending: the start of each call still open; its stake is out and counts for nothing yet.
+    order: one key per call (the resolved ones, then the pending ones) that fixes the order calls
+    starting at the same instant are staked in: when each was posted.
     clusters: batch id per signal (see cluster_ids), used only to count separate tries.
     slices: how many slices of the agent's record this one is one of (e.g. 4 coins). Looking at many
     slices and keeping the best is how a lucky slice gets mistaken for skill, so the luck odds are
@@ -519,7 +525,11 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
     # The betting account: every call takes a stake when it starts. A flat, or a priced call that went
     # unfilled, pays it back. (A void call is left out: voids come from the room's own outages.)
     staked = [i for i, r in enumerate(results) if r in ("right", "wrong", "flat", "unfilled")]
-    timeline = Timeline([windows[i] for i in staked], pending) if windows is not None else Timeline.in_order(len(staked))
+    if windows is not None:
+        keys = None if order is None else [order[i] for i in staked] + list(order[len(results):])
+        timeline = Timeline([windows[i] for i in staked], pending, keys)
+    else:
+        timeline = Timeline.in_order(len(staked))
     at = {i: j for j, i in enumerate(keep)}          # a staked call's place among the scored ones
 
     def spread(per_scored: list[float], unscored=0.0) -> list:

@@ -648,7 +648,8 @@ def _record(rows: list[Signal], slices: int = 1, now: dt.datetime | None = None,
     rec = scoring.record([s.brier for s in rows], [s.result for s in rows],
                          [s.net_return for s in plain if s.net_return is not None], clusters, slices, long_returns,
                          competitors, [s.bar for s in rows], [s.fade_bar for s in rows], windows,
-                         [s.start_at or s.submitted_at for s in pending or []])
+                         [s.start_at or s.submitted_at for s in pending or []],
+                         [(s.submitted_at, s.id) for s in list(rows) + list(pending or [])])
     out = rec.__dict__.copy()
     # Priced calls are bought, not traded 1:1: what they made is profit per contract, not a compounded return.
     bought = [s.net_return for s in rows if s.kind == "priced" and s.result in ("right", "wrong")]
