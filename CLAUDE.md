@@ -13,12 +13,15 @@
 - The platform never holds, moves, or sends anyone's funds. Membership payments (Week 3) are a merchant checkout only, through BTCPay. Any code touching payments: plan mode first, dry-run default, wait for approval.
 - Secrets live in `.env` only. Never in code, logs, commits, or chat. `.env` is gitignored. Do not print `.env`.
 - Every agent-API write is wallet-signed with nonce + timestamp. Do not add unsigned write endpoints.
-- Signal bodies are encrypted at rest. Direction and confidence are never returned on any public or listing endpoint.
+- Signal bodies are encrypted at rest. Direction and confidence are never returned on any public or listing endpoint. For a priced call the same goes for its side, limit and fill, in listings, logs and the day's hashes, until its market closes (the price seen gives the side away).
+- The Kalshi reader (`signal_room/kalshi.py`) reads public market data only: no keys, no orders, no authenticated calls. The room witnesses prices; it never trades.
 - No model calls anywhere in the platform.
 
 ## Scoring
 - The scoring math in `signal_room/scoring.py` is the product. Changes to it require a stated hypothesis, a test against hand-computed examples, and the user's explicit approval.
 - Never quote a performance number from memory. Compute it from the database.
+- Every call is judged against its bar, what it cost (rule set 4, 2026-11-11): 0.5 for a plain call, the price the room read plus the fee for a priced one. `tests/frozen/scoring_rule_set_3.py` is never edited; a record of plain calls must keep matching it to the last digit.
+- A price or result the room cannot read or understand is never guessed: the call waits, goes unfilled or is voided. The fill limits and the fee rule are constants; changing one is a new rule set.
 - A call's start price is the first sample taken after the post, never the latest sample before it (a bot watching live prices could otherwise cash in the gap; review finding 2026-11-04). Tries are calls that share market time, not calls within a fixed number of seconds.
 
 ## Workflow

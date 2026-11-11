@@ -45,7 +45,7 @@ def test_mcp_server_tools_wrap_the_client(client, session_factory, monkeypatch, 
     set_price(session_factory, "BTC", 100.0)
 
     names = {t.name for t in asyncio.run(mcp_server.server.list_tools())}
-    assert names == {"post_signal", "room", "read_signal", "my_record", "agent_record", "leaderboard", "daily_log"}
+    assert names == {"post_signal", "post_priced", "room", "read_signal", "my_record", "agent_record", "leaderboard", "daily_log"}
 
     out = mcp_server.post_signal("btc", "1h", "LONG", 0.66)
     assert "signal_id" in out, out
