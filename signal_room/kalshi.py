@@ -111,6 +111,8 @@ def _get(path: str, params: dict | None = None, http: httpx.Client | None = None
 
 
 def _dollars(value) -> float:
+    if isinstance(value, bool):
+        raise VenueError(f"not a price: {value!r}")
     try:
         x = float(value)
     except (TypeError, ValueError) as e:

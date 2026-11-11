@@ -56,8 +56,58 @@ def test_each_window_runs_once_and_never_late():
     assert fav.next_window(W + 30, None) == W                        # before its moment: this window
     assert fav.next_window(W + 95, W) == W + fav.WINDOW              # just ran it: the next window
     assert fav.next_window(W + 899, W) == W + fav.WINDOW             # still the same window: not again
-    assert fav.next_window(W + 301, None) == W + fav.WINDOW          # woke too late: missed, not posted late
+    assert fav.next_window(W + 151, None) == W + fav.WINDOW          # woke too late: missed, not posted late
+    assert fav.next_window(W + 100, None) == W                       # started ten seconds late: still this window
     assert fav.next_window(W + fav.WINDOW + 5, W) == W + fav.WINDOW  # the next window, not yet run
+
+
+class FakeTime:
+    """A clock the test moves. sleep() jumps it forward, by more than asked if the machine "slept"."""
+    def __init__(self, now, oversleep=0.0):
+        self.now, self.oversleep, self.slept = now, oversleep, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds + self.oversleep
+
+
+def four_markets(venue):
+    for coin in ("BTC", "ETH", "SOL", "XRP"):
+        venue.add_market(f"KX{coin}15M-26NOV111345-45", T0, yes_bid=0.69, yes_ask=0.70)
+
+
+def test_the_loop_runs_each_window_once_at_its_moment(client, session_factory, venue, clock):
+    four_markets(venue)
+    bot, t = RoomClient(Agent(client, fav.NAME)), FakeTime(W + 20)
+    done = fav.step(bot, None, t, t.sleep)
+    assert done == W and t.slept == [70] and t.now == W + 90           # waited for 90 s in, then ran
+    s = session_factory()
+    assert s.query(Signal).count() == 4
+    done = fav.step(bot, done, t, t.sleep)                             # straight back in: the same window is not run again
+    assert done == W + fav.WINDOW and t.now == W + fav.WINDOW + 90
+    assert s.query(Signal).count() == 4                                # (the next window has no markets here: nothing new)
+    s.close()
+
+
+def test_a_machine_that_sleeps_through_the_moment_misses_the_window(client, session_factory, venue, clock):
+    """Review finding 2026-11-11: the time was not read again after the wait, so a laptop that slept
+    eleven minutes bought its favourites with two and a half minutes left."""
+    four_markets(venue)
+    bot, t = RoomClient(Agent(client, fav.NAME)), FakeTime(W + 20, oversleep=660)
+    assert fav.step(bot, None, t, t.sleep) == W                        # the window counts as done
+    s = session_factory()
+    assert s.query(Signal).count() == 0                                # and nothing was posted late
+    s.close()
+
+
+def test_a_bot_started_mid_window_does_not_post_late(client, session_factory, venue, clock):
+    four_markets(venue)
+    bot = RoomClient(Agent(client, fav.NAME))
+    assert fav.run_slot(bot, W, venue.client(), now=W + 299) == 0      # five minutes in: missed
+    assert fav.run_slot(bot, W, venue.client(), now=W + 120) == 4      # thirty seconds late: still the same bet
 
 
 def test_the_control_buys_all_four_favourites_and_can_earn_nothing(client, session_factory, venue, clock):
@@ -151,6 +201,48 @@ def test_bets_the_bridge_must_not_post(client, session_factory, venue, clock):
     assert go({"id": 4, "timestamp": "not a time"}) is False
     assert posts == [] and len(posted) == 4                                  # each remembered, none posted
     assert go(bet(5)) is False and len(posts) == 1                           # a fresh one goes through
+
+
+def test_each_bet_s_age_is_taken_when_its_turn_comes(client, session_factory, venue, clock):
+    """Review finding 2026-11-11: the time was read once per look at the file, so four bets seen at 25 s,
+    each taking 6 s to post, landed at 31, 37, 43 and 49 s against the 30-second rule."""
+    started = T0.replace(tzinfo=dt.timezone.utc)
+    t = [(T0 + dt.timedelta(seconds=88 + 25)).replace(tzinfo=dt.timezone.utc)]
+    posts = []
+
+    class Slow:
+        def post_priced(self, *a):
+            posts.append(a[0])
+            t[0] += dt.timedelta(seconds=6)                                  # each post takes six seconds
+            return {"fill": "filled", "signal_id": "x"}
+    posted = set()
+    coins = ("BTC", "ETH", "SOL", "XRP")
+    for i, coin in enumerate(coins):
+        bridge.handle(bet(i, ticker=f"KX{coin}15M-26NOV111345-45"), lambda: t[0], started, posted, lambda s: Slow())
+    assert posts == ["KXBTC15M-26NOV111345-45"]                              # 25 s old: posted. 31, 37, 43 s: not.
+    assert len(posted) == 4
+
+
+def test_a_refused_bet_waits_before_it_is_tried_again():
+    started = T0.replace(tzinfo=dt.timezone.utc)
+    now = (T0 + dt.timedelta(seconds=90)).replace(tzinfo=dt.timezone.utc)
+    tries = []
+
+    class Busy:
+        def post_priced(self, *a):
+            tries.append(1)
+            raise SignalRoomError(409, "one open signal per pair per horizon")
+    posted, holdoff = set(), {}
+    for second in range(12):                                                 # the file is looked at once a second
+        assert bridge.handle(bet(), now + dt.timedelta(seconds=second), started, posted, lambda s: Busy(), holdoff) is True
+    assert len(tries) == 3                                                   # at 0, 5 and 10 s: not twelve times
+
+
+def test_a_shadow_log_of_an_unexpected_shape_is_read_as_empty(tmp_path):
+    for text in ("[]", '{"bets": null}', '{"bets": 7}', "3", '"x"', '[{"id": 1}, 5]'):
+        f = tmp_path / "shadow.json"
+        f.write_text(text)
+        assert bridge.load_bets(str(f)) == ([{"id": 1}] if "id" in text else [])
 
 
 def test_a_transient_refusal_is_retried_and_a_permanent_one_is_not():

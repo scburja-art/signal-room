@@ -19,8 +19,9 @@ Timestamps in the shadow log are UTC (Kalshi's clock); the bridge compares in UT
 after the bridge started are posted, so an old log does not flood the room. Posted bets are
 remembered by id + timestamp, because Kakalshi restarts bet numbering whenever it resets its log.
 
-Transient errors (rate limit, server restart, the last window's call still closing) are retried on
-the next look, until the bet is too old. Permanent rejections are recorded and skipped.
+Transient errors (rate limit, server restart, the last window's call still closing) are retried
+every few seconds, until the bet is too old. Permanent rejections are recorded and skipped. The bet's
+age is measured at the moment of each post, not once per look at the file.
 
 Each Kakalshi strategy gets its own Signal Room agent (own wallet, own record), named
 `kakalshi-<strategy>-priced`; the wallet is kept in the state directory under that name. The plain
@@ -47,6 +48,7 @@ MAX_STATED = 0.99
 MAX_AGE_SECONDS = 30     # a bet first seen later than this is not posted
 POLL_SECONDS = 1.0
 TRANSIENT_STATUSES = {401, 409, 429, 503}  # clock skew, last call still closing, rate limit, restart: try again
+RETRY_SECONDS = 5        # how long a bet that hit a transient error waits before its next try
 
 
 def load_posted(path: str) -> set:
@@ -95,8 +97,8 @@ def load_bets(path: str) -> list[dict]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return []
-    bets = data.get("bets", data if isinstance(data, list) else [])
-    return [b for b in bets if isinstance(b, dict)]
+    bets = data.get("bets") if isinstance(data, dict) else data
+    return [b for b in bets if isinstance(b, dict)] if isinstance(bets, list) else []
 
 
 def strategy_of(bet: dict) -> str:
@@ -104,16 +106,22 @@ def strategy_of(bet: dict) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "unknown"
 
 
-def handle(bet: dict, now: dt.datetime, started: dt.datetime, posted: set, client_for) -> bool:
-    """Deal with one bet from the log. Returns True if it should be looked at again (a transient failure)."""
+def handle(bet: dict, now, started: dt.datetime, posted: set, client_for, holdoff: dict | None = None) -> bool:
+    """Deal with one bet from the log. Returns True if it should be looked at again (a transient failure).
+    now: the time, or a function giving it (so each bet's age is taken when its turn comes, not when the
+    file was read). holdoff: bet -> when it may next be tried, so a retry is not attempted every second."""
     bid = f"{bet.get('id')}@{bet.get('timestamp', '')}"
     if bid in posted:
         return False
+    now = now() if callable(now) else now
+    if holdoff is not None and bid in holdoff and now < holdoff[bid]:
+        return True
     try:
         ts = dt.datetime.fromisoformat(bet["timestamp"])
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=dt.timezone.utc)
     except Exception:
+        log.warning("bet %s: its timestamp cannot be read; skipped", bid)
         posted.add(bid)
         return False
     if ts < started:
@@ -138,12 +146,16 @@ def handle(bet: dict, now: dt.datetime, started: dt.datetime, posted: set, clien
     except SignalRoomError as e:
         if e.status in TRANSIENT_STATUSES:
             log.info("bet %s: %s, will retry", bid, e)
+            if holdoff is not None:
+                holdoff[bid] = now + dt.timedelta(seconds=RETRY_SECONDS)
             return True
         log.warning("bet %s: rejected: %s", bid, e)
         posted.add(bid)
         return False
-    except Exception as e:  # network blip, server restart: retry on the next look
+    except Exception as e:  # network blip, server restart: retry shortly
         log.warning("bet %s: post failed (%s), will retry", bid, type(e).__name__)
+        if holdoff is not None:
+            holdoff[bid] = now + dt.timedelta(seconds=RETRY_SECONDS)
         return True
 
 
@@ -163,7 +175,7 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: float =
     started = dt.datetime.now(dt.timezone.utc)
     log.info("kakalshi adapter watching %s (one agent per strategy)", shadow_path)
     waiting_logged = False
-    seen, retry = None, False
+    seen, retry, holdoff = None, False, {}
     while True:
         try:
             stamp = (os.path.getmtime(shadow_path), os.path.getsize(shadow_path))
@@ -184,10 +196,11 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: float =
             time.sleep(poll_seconds)
             continue
         before = len(posted)
-        now = dt.datetime.now(dt.timezone.utc)
         retry = False
         for bet in bets:
-            retry = handle(bet, now, started, posted, client_for) or retry
+            retry = handle(bet, lambda: dt.datetime.now(dt.timezone.utc), started, posted, client_for, holdoff) or retry
+        if not retry:
+            holdoff.clear()
         # A torn read (Kakalshi mid-write) comes back empty: look again rather than trusting it.
         seen = stamp if bets else None
         if len(posted) != before:

@@ -266,10 +266,18 @@ def render(line: str, color: bool = True) -> str | None:
     candle = re.match(r"(BTC|ETH|SOL|XRP): candle fetch failed: (.*)", msg)
     if candle:
         return p.row(when, who, "⚠ SKIPPED", YELLOW, f"couldn't get {candle.group(1)}'s last hour from Coinbase ({candle.group(2)}); no {candle.group(1)} call this round")
+    if "live read failed" in msg:
+        return None                                  # the WAITING row that follows says it
+    if msg.startswith("Kalshi cannot be reached"):
+        return p.row(when, "Room", "⚠ KALSHI", YELLOW, "can't reach Kalshi right now; priced calls wait for the next minute")
+    refused = re.match(r"priced call on KX(BTC|ETH|SOL|XRP)15M\S* refused", msg)
+    if refused:
+        return p.row(when, "Room", "⚠ KALSHI", YELLOW, f"can't use Kalshi's answer for {refused.group(1)}; the call was refused, nothing recorded")
+    short = msg if len(msg) <= 66 else msg[:65] + "…"   # the full line is in the log file; the feed stays one row
     if level == "WARNING":
-        return p.row(when, who, "⚠ WARNING", YELLOW, msg)
+        return p.row(when, who, "⚠ WARNING", YELLOW, short)
     if level in ("ERROR", "CRITICAL"):
-        return p.row(when, who, "✘ ERROR", RED + BOLD, msg)
+        return p.row(when, who, "✘ ERROR", RED + BOLD, short)
     return p.row(when, who, "", GRAY, p(GRAY, msg))
 
 

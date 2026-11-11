@@ -301,3 +301,121 @@ def test_kalshi_unreachable_is_said_plainly_not_passed_off_as_checked(client, se
     assert "could not be reached for 2 priced calls" in verify.report(r)
     assert r["intact"] and not r["ok"]                                  # intact, but not verified until Kalshi is asked
     assert "NOT YET" in verify.report(r) and "VERIFIED:" not in verify.report(r)
+
+
+# ---------- a room that lies consistently (review findings, 2026-11-11) ----------
+#
+# In each case the room's own hashes, leaves, root and anchor all agree, so links 1 to 3 hold. Only
+# holding the call to the published rules and to Kalshi's own record can show the lie.
+
+def one_call(client, factory, venue, clock, result_at_kalshi, limit=0.85):
+    """One priced call (NO offered at 85c when it lands at 18:31:30), closed by Kalshi's result."""
+    no_at_85(venue)
+    out = call(Agent(client, "author"), limit=limit, confidence=min(0.99, limit + 0.05)).json()
+    # Kalshi's own history. 18:30-18:31: NO offered 48c to 60c. 18:31-18:32: NO offered 84c to 90c.
+    venue.add_minute(XRP, T0 + dt.timedelta(minutes=1), yes_bid=(0.40, 0.52), yes_ask=(0.41, 0.53))
+    venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.10, 0.16), yes_ask=(0.11, 0.17))
+    close_market(venue, clock, factory, result_at_kalshi)
+    return out["signal_id"]
+
+
+def rewrite(factory, sid, **changes):
+    """Change a closed call's record and recompute its leaf, as a dishonest room would before anchoring."""
+    s = factory()
+    sig = s.get(Signal, sid)
+    for k, v in changes.items():
+        setattr(sig, k, v)
+    body = service.unseal(sig.agent_id, sig.body_cipher)
+    sig.leaf = priced_leaf(sig.hash, body["salt"], service.fill_record(sig, body))
+    s.commit()
+    s.close()
+
+
+def caught(client, factory, words):
+    day, chain = anchor(factory)
+    r = check(client, day, chain)
+    assert not r["mismatched"] and r["root_matches_anchor"] and r["chain_matches"]      # internally spotless
+    assert not r["ok"] and len(r["venue_mismatched"]) == 1 and words in r["venue_mismatched"][0], r["venue_mismatched"]
+    assert "NOT VERIFIED" in verify.report(r)
+
+
+def test_an_honest_single_call_verifies(client, session_factory, venue, clock):
+    one_call(client, session_factory, venue, clock, "no")
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert r["ok"] and r["venue_checked"] == 1
+
+
+def test_a_true_price_with_a_false_cost_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "no")
+    rewrite(session_factory, sid, bar=0.60, credit=4 * (0.4 ** 2 - 0.1 ** 2), net_return=0.40)   # bought at 85c, booked at 60c
+    caught(client, session_factory, "price 0.85 plus Kalshi's fee is 0.86")
+
+
+def test_a_fill_moved_to_a_cheaper_minute_before_the_call_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "no")
+    early = T0 + dt.timedelta(seconds=40)                                # 50 s before the call was stamped
+    rewrite(session_factory, sid, fill_at=early, start_at=early, fill_ask=0.50, fill_bid=0.49, bar=0.52, fade_bar=0.47)
+    caught(client, session_factory, "the price was read at")
+
+
+def test_a_filled_loser_relabelled_as_too_thin_is_caught_when_the_size_does_not_say_so(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "yes")         # the call lost
+    rewrite(session_factory, sid, fill="unfilled", fill_reason="under 10 on offer", bar=None, fade_bar=None,
+            result="unfilled", brier=None, credit=0.0, net_return=None, venue_result=None, start_at=None)
+    caught(client, session_factory, "the fill rule gives filled")        # 5,000 were on offer by the room's own record
+
+
+def test_a_filled_loser_voided_after_anchoring_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "yes")
+    day, chain = anchor(session_factory)                                 # anchored honestly
+    s = session_factory()
+    sig = s.get(Signal, sid)
+    sig.result, sig.brier, sig.credit, sig.net_return, sig.venue_result = "void", None, 0.0, None, None
+    s.commit()
+    s.close()
+    r = check(client, day, chain)                                        # no hash or leaf was touched
+    assert not r["mismatched"] and r["root_matches_anchor"]
+    assert not r["ok"] and "voided, though Kalshi's result is yes" in r["venue_mismatched"][0]
+
+
+def test_a_fill_above_the_agent_s_own_limit_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "no", limit=0.80)   # honestly: not filled, 85c is over 80c
+    rewrite(session_factory, sid, fill="filled", fill_reason=None, bar=0.86, fade_bar=0.83, start_at=T0 + dt.timedelta(seconds=90),
+            result="right", venue_result="no", confidence=0.86, brier=0.0196, credit=0.0, net_return=0.14)
+    caught(client, session_factory, "the fill rule gives unfilled (price above the limit)")
+
+
+def test_a_price_recorded_as_text_fails_the_check_instead_of_skipping_it(client, session_factory, venue, clock, monkeypatch):
+    sid = one_call(client, session_factory, venue, clock, "no")
+    honest = service.fill_record
+    monkeypatch.setattr(service, "fill_record", lambda sig, body: {**honest(sig, body), "ask": "sixty cents"})
+    rewrite(session_factory, sid, bar=0.62)
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert not r["ok"] and r["venue_unreachable"] == 0 and "cannot be checked" in r["venue_mismatched"][0]
+
+
+def test_a_result_for_a_call_with_no_price_is_caught(client, session_factory, venue, clock):
+    sid = one_call(client, session_factory, venue, clock, "no")
+    s = session_factory()
+    sig = s.get(Signal, sid)
+    sig.fill = sig.fill_at = sig.fill_source = sig.leaf = None           # "we never read a price", yet scored right
+    s.commit()
+    s.close()
+    day, chain = anchor(session_factory)
+    r = check(client, day, chain)
+    assert not r["ok"] and "with no record of a price" in r["venue_mismatched"][0]
+
+
+def test_the_checker_has_its_own_copy_of_the_fee_and_the_fill_rule():
+    from signal_room import kalshi
+    import inspect
+    assert "signal_room" not in inspect.getsource(verify).split("def main(")[0].replace("signal-room", "")
+    for cents in range(1, 100):
+        p = cents / 100
+        assert verify.kalshi_fee(p) == kalshi.fee(p) and verify.kalshi_cost(p) == kalshi.cost(p)
+        assert verify.kalshi_fade_bar(p) == kalshi.fade_bar(p)
+    for ask, size, limit, left in ((None, 50, 0.5, 600), (0.5, 50, 0.5, 59), (0.96, 50, 0.99, 600), (0.04, 50, 0.5, 600),
+                                   (0.51, 50, 0.5, 600), (0.5, 9, 0.5, 600), (0.5, 10, 0.5, 60), (0.95, 10, 0.95, 600)):
+        assert verify.fill_rule(ask, size, limit, left) == service.decide_fill(ask, size, limit, left)
