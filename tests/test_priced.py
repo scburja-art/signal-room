@@ -434,3 +434,50 @@ def test_a_priced_record_reads_against_its_bar(client, session_factory):
     assert rec["p_luck"] < 0.05 and rec["verdict"] == "probably_not_luck"
     assert service.leaderboard(s, None, None, "all")[0]["agent_id"] == a.id
     s.close()
+
+
+# ---------- the live database ----------
+
+LIVE_SIGNALS_TABLE = """CREATE TABLE signals (
+	id VARCHAR(32) NOT NULL, agent_id VARCHAR(32) NOT NULL, pair VARCHAR(8) NOT NULL, horizon VARCHAR(4) NOT NULL,
+	body_cipher TEXT NOT NULL, hash VARCHAR(64) NOT NULL, submitted_at DATETIME NOT NULL, resolve_at DATETIME NOT NULL,
+	price_at_submit FLOAT, start_at DATETIME, hash_version INTEGER, resolved_at DATETIME, price_at_resolve FLOAT,
+	direction VARCHAR(5), confidence FLOAT, result VARCHAR(5), brier FLOAT, net_return FLOAT, credit FLOAT,
+	scoring_version INTEGER, PRIMARY KEY (id), FOREIGN KEY(agent_id) REFERENCES agents (id))"""
+
+
+def test_migration_from_the_live_table_as_it_stood_on_2026_11_11(tmp_path):
+    """The signals table exactly as the live database defined it before rule set 4 (read from it that
+    day). After migrating, a priced call can be stored, closed as 'unfilled' (longer than the old
+    VARCHAR(5)), and read back; plain rows are untouched; running it twice changes nothing."""
+    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy.orm import sessionmaker
+    from signal_room.db import Base, init_db
+    eng = create_engine(f"sqlite:///{tmp_path}/live.db")
+    with eng.begin() as c:
+        Base.metadata.tables["agents"].create(c)
+        c.execute(text(LIVE_SIGNALS_TABLE))
+        c.execute(text("CREATE UNIQUE INDEX ux_signal_one_open ON signals (agent_id, pair, horizon) WHERE resolved_at IS NULL"))
+        c.execute(text("INSERT INTO agents (id, wallet, api_key_hash, name, status, delist_count, created_at) VALUES ('a','w','k','old','active',0,'2026-10-26 00:00:00')"))
+        c.execute(text("INSERT INTO signals (id, agent_id, pair, horizon, body_cipher, hash, submitted_at, resolve_at, price_at_submit, start_at, hash_version, "
+                       "resolved_at, price_at_resolve, direction, confidence, result, brier, net_return, credit, scoring_version) VALUES "
+                       "('p1','a','BTC','1h','c','h','2026-11-10 10:00:00','2026-11-10 11:00:30',100.0,'2026-11-10 10:00:30',3,"
+                       "'2026-11-10 11:00:30',101.0,'long',0.6,'right',0.16,0.009,0.36,3)"))
+    init_db(eng)
+    init_db(eng)
+    cols = {c["name"] for c in inspect(eng).get_columns("signals")}
+    assert {"kind", "venue", "market", "fill", "fill_ask", "bar", "fade_bar", "side", "limit_price", "venue_result", "leaf"} <= cols
+    s = sessionmaker(bind=eng)()
+    old = s.get(Signal, "p1")
+    assert (old.kind, old.bar, old.result, old.credit, old.scoring_version) == (None, None, "right", 0.36, 3)
+    s.add(Signal(id="n1", agent_id="a", pair="XRP", horizon="15m", kind="priced", venue="kalshi", market=XRP, body_cipher="c",
+                 hash="h4", hash_version=4, submitted_at=T0, resolve_at=T0 + dt.timedelta(minutes=15), fill="unfilled",
+                 fill_reason="price above the limit", fill_ask=0.88, leaf="l" * 64))
+    s.commit()
+    new = s.get(Signal, "n1")
+    new.result, new.resolved_at, new.side = "unfilled", new.resolve_at, "no"
+    s.commit()
+    assert s.execute(text("SELECT result, fill, side, bar FROM signals WHERE id='n1'")).one() == ("unfilled", "unfilled", "no", None)
+    rec = service.agent_record(s, "a", None, "all")
+    assert rec["n"] == 1 and rec["priced"] == 0 and rec["bar"] == 0.5 and rec["profit_per_contract"] is None
+    s.close()
