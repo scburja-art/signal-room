@@ -13,15 +13,16 @@
 - The platform never holds, moves, or sends anyone's funds. Membership payments (Week 3) are a merchant checkout only, through BTCPay. Any code touching payments: plan mode first, dry-run default, wait for approval.
 - Secrets live in `.env` only. Never in code, logs, commits, or chat. `.env` is gitignored. Do not print `.env`.
 - Every agent-API write is wallet-signed with nonce + timestamp. Do not add unsigned write endpoints.
-- Signal bodies are encrypted at rest. Direction and confidence are never returned on any public or listing endpoint. For a priced call the same goes for its side, limit and fill, in listings, logs and the day's hashes, until its market closes (the price seen gives the side away).
+- Signal bodies are encrypted at rest. Direction and confidence are never returned on any public or listing endpoint. For a priced call the same goes for its side, limit and fill, in listings, logs and the day's hashes, until its market closes (the price seen gives the side away); what the room saw sits in the encrypted body, not on the row, until then.
 - The Kalshi reader (`signal_room/kalshi.py`) reads public market data only: no keys, no orders, no authenticated calls. The room witnesses prices; it never trades.
 - No model calls anywhere in the platform.
 
 ## Scoring
 - The scoring math in `signal_room/scoring.py` is the product. Changes to it require a stated hypothesis, a test against hand-computed examples, and the user's explicit approval.
 - Never quote a performance number from memory. Compute it from the database.
-- Every call is judged against its bar, what it cost (rule set 4, 2026-11-11): 0.5 for a plain call, the price the room read plus the fee for a priced one. `tests/frozen/scoring_rule_set_3.py` is never edited; a record of plain calls must keep matching it to the last digit.
-- A price or result the room cannot read or understand is never guessed: the call waits, goes unfilled or is voided. The fill limits and the fee rule are constants; changing one is a new rule set.
+- Every call is judged against its bar, what it cost (rule set 4, 2026-11-11): 0.5 for a plain call, the price the room read plus the fee for a priced one. `tests/frozen/scoring_rule_set_3.py` is never edited; a record of plain calls must keep matching it to the last digit on credits, skill, score and delisting.
+- The luck odds and every range come from the betting account (`scoring.Timeline`): a stake is fixed the moment its call starts and only cash in hand counts. Never average or reweight calls after the fact (review finding 2026-11-11: averaging a "try" let a coin-flipper shrink its losses and be certified every time).
+- A price or result the room cannot read or understand is never guessed: the call is refused, waits, goes unfilled or is voided. Unreachable (`VenueUnreachable`) waits; answered-but-unusable (`VenueError`) refuses, so nothing is parked. The fill limits and the fee rule are constants; changing one is a new rule set.
 - A call's start price is the first sample taken after the post, never the latest sample before it (a bot watching live prices could otherwise cash in the gap; review finding 2026-11-04). Tries are calls that share market time, not calls within a fixed number of seconds.
 
 ## Workflow
@@ -31,6 +32,8 @@
 - HQ-worthy work (decisions, notable numbers, shipped features, in plain English) also gets filed in the HQ vault, `~/Stove Codes/HQ/Signal Room/`: update the dashboard, add a decision note to `Data Bank/Decisions/`, add the INDEX line, per HQ's own CLAUDE.md.
 - A bot loop that runs on a schedule must remember the last slot it ran and never run it twice; test it (forecaster v2 re-posted its slot for 50 s on its first night).
 - Any database schema change is run against a copy of the live database (with its -wal file) and a post is made through the API on that copy before the user is told to restart. SQLite keeps the original CREATE TABLE's constraints whatever the model says (rule set 3 made a column nullable; the live table still said NOT NULL and the room posted nothing for nine hours).
+- Closing a call and paying its credits happens under one lock after re-reading the row; two threads reached the same call and both paid (review finding 2026-11-11).
+- A scoring or protocol change gets an independent review by an agent that has not seen the build, before go-live. The first one for rule set 4 found a certifiable coin-flipper.
 - When corrected, add a rule here so the mistake does not recur. Keep this file short.
 
 ## Commits
