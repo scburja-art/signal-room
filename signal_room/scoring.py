@@ -1,9 +1,15 @@
 """The scoring math. Pure functions, no I/O. See SPEC.md and README.md.
 
-Brier score per signal:      BS = (p - y)^2            (right: y=1, wrong: y=0)
-Credit per resolved signal:  credit = 4 * (0.25 - BS)  (signed: a wrong call costs credits)
-Brier skill score per agent: BSS = 1 - mean(BS) / 0.25 over right/wrong signals only
-Leaderboard score:           BSS * n / (n + SHRINK_N)
+Every call has a bar: what the call cost. A plain call (this coin, up or down, over this window) is
+not sold anywhere, so its bar is an even bet, 0.5. A priced call (this side of this venue market,
+bought at the venue's asking price) has the bar ask + fee. An agent has skill only if it wins more
+often than its bar. With every bar at 0.5 each formula below is the formula the room used before
+rule set 4, to the last bit.
+
+Brier score per signal:      BS = (p - y)^2                       (right: y=1, wrong: y=0)
+Credit per resolved signal:  credit = 4 * ((bar - y)^2 - BS)      (signed; 0 for stating the bar itself)
+Skill per agent:             mean credit over right/wrong signals (the Brier skill score when bar = 0.5)
+Leaderboard score:           skill * n / (n + SHRINK_N)
 
 Flat outcomes (price moved less than the flat band) are recorded and counted but not scored:
 no Brier, no credit, not in n. Scoring them as half-right made a 0.50 call on a quiet market
@@ -26,7 +32,9 @@ built for one look at the end would, checked that often, eventually call almost 
 fraction of their bankroll on every batch the agent calls. If the calls carry no information, that
 bankroll is a fair game and (Ville's inequality) the chance it EVER reaches 20x is at most 1 in 20,
 no matter when or how often it is checked. The luck odds are 1 / bankroll, averaged over five stake
-sizes (10% to 50%) so no one stake is picked after the fact. Using the current bankroll rather than
+sizes (10% to 50%) so no one stake is picked after the fact. Each bet is placed at the call's own
+odds: a stake on a call with bar r returns (1 - r) / r if it wins and is lost if it does not, so a
+caller who wins exactly as often as its bars say breaks even. Using the current bankroll rather than
 its peak means a record that fades loses its verdict. The same test run on the opposite side says
 when an agent is reliably worse than a coin flip.
 """
@@ -45,7 +53,10 @@ COIN_FLIP_BS = 0.25
 #   2  2026-10-28: flats unscored; credits signed
 # Record-level changes, no per-signal change (version stays 2):
 #      2026-10-31: calls posted together count as one try; flats scored under 1 left out of aggregates
-SCORING_VERSION = 3   # 3 (2026-11-05): start price is the first sample after the post
+#   3  2026-11-05: start price is the first sample after the post
+SCORING_VERSION = 4   # 4 (2026-11-11): every call is judged against its bar (0.5 plain, ask + fee priced)
+
+EVEN_BAR = 0.5        # a plain call's bar, and the fade bar that goes with it
 
 
 def outcome(direction: str, price_start: float, price_end: float) -> tuple[str, float | None]:
@@ -64,10 +75,17 @@ def brier(confidence: float, y: float | None) -> float | None:
     return (confidence - y) ** 2
 
 
-def credit_for(bs: float | None, result: str) -> float:
-    if result == "flat" or bs is None:
+def ref_brier(bar: float, y: float) -> float:
+    """The Brier score of saying exactly what the bar says. 0.25 when the bar is an even bet."""
+    return (bar - y) ** 2
+
+
+def credit_for(bs: float | None, result: str, bar: float = EVEN_BAR) -> float:
+    """Credits for one scored call: how much closer the stated chance was to what happened than the
+    bar was. Only right/wrong calls earn or lose; stating the bar itself earns nothing either way."""
+    if result not in ("right", "wrong") or bs is None:
         return 0.0
-    return 4.0 * (COIN_FLIP_BS - bs)
+    return 4.0 * (ref_brier(bar, 1.0 if result == "right" else 0.0) - bs)
 
 
 def net_return(direction: str, price_start: float, price_end: float) -> float:
@@ -76,11 +94,13 @@ def net_return(direction: str, price_start: float, price_end: float) -> float:
     return signed - config.ROUND_TRIP_COST
 
 
-def skill_score(briers: list[float]) -> float:
-    """BSS over a list of Brier scores. Empty list → 0."""
+def skill_score(briers: list[float], refs: list[float] | None = None) -> float:
+    """Skill over a list of Brier scores: the mean credit per call. refs is each call's ref_brier
+    (None: every bar is an even bet, and this is the Brier skill score). Empty list → 0."""
     if not briers:
         return 0.0
-    return 1.0 - (sum(briers) / len(briers)) / COIN_FLIP_BS
+    mean_ref = COIN_FLIP_BS if refs is None else sum(refs) / len(refs)
+    return (mean_ref - sum(briers) / len(briers)) / COIN_FLIP_BS
 
 
 def shrink(bss: float, n: int) -> float:
@@ -118,21 +138,44 @@ def _batches(hits: list[int], clusters: list | None) -> list[tuple[int, int]]:
 STAKES = (0.1, 0.2, 0.3, 0.4, 0.5)   # fractions of bankroll staked per batch; fixed, never tuned to data
 
 
-def luck_odds(batches: list[tuple[int, int]]) -> tuple[float, float]:
-    """(p_skill, p_worse): chance a no-information caller looks this good / this bad, valid at any
-    stopping time. 1.0 means no evidence either way."""
-    def p_for(sign: int) -> float:
-        logs = [0.0] * len(STAKES)
-        for right, size in batches:
-            x = sign * (2 * right - size) / size
-            for j, lam in enumerate(STAKES):
-                logs[j] += math.log1p(lam * x)
-        top = max(logs)
-        log_mean = top + math.log(sum(math.exp(v - top) for v in logs) / len(STAKES))
-        return min(1.0, math.exp(-log_mean))
-    if not batches:
+def call_payoffs(hits: list[int], bars: list[float] | None = None,
+                 fades: list[float] | None = None) -> tuple[list[float], list[float]]:
+    """Per call, what a unit stake returns: (on the call, at its bar; against the call, at its fade bar).
+    A stake on a call with bar r returns (1 - r) / r if the call wins and -1 if it loses. A stake against
+    it, where the other side costs 1 - f, returns f / (1 - f) if the call loses and -1 if it wins.
+    None means every bar is an even bet: the payoffs are then +1 and -1."""
+    up, down = [], []
+    for i, h in enumerate(hits):
+        r = EVEN_BAR if bars is None else bars[i]
+        f = EVEN_BAR if fades is None else fades[i]
+        up.append((h - r) / r)
+        down.append((f - h) / (1.0 - f))
+    return up, down
+
+
+def _luck(xs: list[float]) -> float:
+    """1 / bankroll after staking each fraction in STAKES on every try's payoff, averaged over the stakes."""
+    logs = [0.0] * len(STAKES)
+    for x in xs:
+        for j, lam in enumerate(STAKES):
+            logs[j] += math.log1p(lam * x)
+    top = max(logs)
+    log_mean = top + math.log(sum(math.exp(v - top) for v in logs) / len(STAKES))
+    return min(1.0, math.exp(-log_mean))
+
+
+def luck_from(up: list[float], down: list[float]) -> tuple[float, float]:
+    """(p_skill, p_worse) from one payoff per try on each side: chance a caller with no edge over its
+    bars looks this good / this bad, valid at any stopping time. 1.0 means no evidence either way."""
+    if not up:
         return 1.0, 1.0
-    return p_for(+1), p_for(-1)
+    return _luck(up), _luck(down)
+
+
+def luck_odds(batches: list[tuple[int, int]]) -> tuple[float, float]:
+    """luck_from for even-bar calls given as (right, size) per try: each try pays (right - wrong) / size."""
+    up = [(2 * right - size) / size for right, size in batches]
+    return luck_from(up, [-x for x in up])
 
 
 def _batch_means(values: list[float], clusters: list | None) -> list[float]:
@@ -186,6 +229,53 @@ def confidence_range(values: list[float], clusters: list | None, alpha: float = 
     return edge(+1, mean, eps) if mean > eps else 0.0, edge(-1, mean, 1 - eps) if mean < 1 - eps else 1.0
 
 
+def _wealth_x(xs: list[float]) -> float:
+    """Mean bankroll over STAKES after staking on each try's payoff (each payoff is at least -1)."""
+    logs = [sum(math.log1p(lam * x) for x in xs) for lam in STAKES]
+    if max(logs) > 700:
+        return math.inf
+    return sum(math.exp(v) for v in logs) / len(logs)
+
+
+def edge_range(hits: list[int], bars: list[float], fades: list[float], clusters: list | None,
+               alpha: float = 0.05) -> tuple[float, float]:
+    """Range for how far the true win rate sits above the bars, holding however often it is checked.
+    A shift d is ruled out at the low end once betting on the calls at bars raised by d reaches a
+    bankroll of 2 / alpha, and at the high end once betting against them at fade bars raised by d does.
+    With every bar at 0.5 this is confidence_range on the hit rate, minus 0.5."""
+    if not hits:
+        return -1.0, 1.0
+    limit = 2.0 / alpha
+    eps = 1e-9
+
+    def up(d: float) -> float:      # falls as d rises
+        return _wealth_x(_batch_means([(h - (r + d)) / (r + d) for h, r in zip(hits, bars)], clusters))
+
+    def down(d: float) -> float:    # rises as d rises
+        return _wealth_x(_batch_means([((f + d) - h) / (1.0 - (f + d)) for h, f in zip(hits, fades)], clusters))
+
+    def cross(wealth, inside: float, outside: float) -> float:
+        # outside: the far end of what the bars allow; inside: a shift the test does not rule out.
+        if wealth(outside) < limit:
+            return outside
+        for _ in range(60):          # move inside toward the centre until it really is inside
+            if wealth(inside) < limit:
+                break
+            inside = (inside + centre) / 2
+        for _ in range(60):
+            mid = (inside + outside) / 2
+            if wealth(mid) >= limit:
+                outside = mid
+            else:
+                inside = mid
+        return outside
+
+    hit = sum(hits) / len(hits)
+    low_end, high_end = -min(bars) + eps, 1.0 - max(fades) - eps
+    centre = min(high_end, max(low_end, hit - sum(bars) / len(bars)))
+    return cross(up, centre, low_end), cross(down, min(high_end, max(low_end, hit - sum(fades) / len(fades))), high_end)
+
+
 MIN_TRIES = 10   # separate tries before any verdict but "unproven"
 
 # The verdict ladder. Earned only by the math; nothing else moves an agent up it.
@@ -212,12 +302,12 @@ def verdict(n: int, tries: int, p: float, p_worse: float) -> str:
 NEXT_STEP = {"unproven": "probably_not_luck", "luck": "probably_not_luck", "probably_not_luck": "proven"}
 
 
-def tries_to_reach(batches: list[tuple[int, int]], target_p: float, cap: int = 20000) -> int | None:
+def tries_to_reach_x(xs: list[float], target_p: float, cap: int = 20000) -> int | None:
     """How many more tries until the luck odds drop under target_p, if the next stretch looks like
-    the record so far (history replayed in a loop). None when the record is not heading there."""
-    if not batches:
+    the record so far (history replayed in a loop). xs is one payoff per try. None when the record is
+    not heading there."""
+    if not xs:
         return None
-    xs = [(2 * r - n) / n for r, n in batches]
     logs = [sum(math.log1p(lam * x) for x in xs) for lam in STAKES]   # today, and the gain per replay
     if max(logs) <= 0:
         return None
@@ -234,6 +324,11 @@ def tries_to_reach(batches: list[tuple[int, int]], target_p: float, cap: int = 2
         if log_mean(logs) >= goal:
             return step
     return None
+
+
+def tries_to_reach(batches: list[tuple[int, int]], target_p: float, cap: int = 20000) -> int | None:
+    """tries_to_reach_x for even-bar calls given as (right, size) per try."""
+    return tries_to_reach_x([(2 * r - n) / n for r, n in batches], target_p, cap)
 
 
 @dataclass
@@ -265,9 +360,17 @@ class Record:
     exploratory: bool = False      # a slice (one coin or one time window): the bar is raised per slice
     always_long_return: float = 0.0   # the same windows, same cost, always calling long: the no-skill baseline
     calibration: list = field(default_factory=list)   # per confidence band: stated vs actual
+    # The bar (rule set 4): what the calls cost on average, and how far the win rate sits above it.
+    bar: float = EVEN_BAR          # mean bar over scored calls: 0.5 for a record of plain calls
+    edge: float = 0.0              # hit_rate - bar
+    edge_low: float = -1.0
+    edge_high: float = 1.0
+    priced: int = 0                # scored calls made on a venue market
 
 
-CALIBRATION_BANDS = ((0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.0001))
+# Plain calls state 0.5 or more; a priced call on a long shot can state less, so the bands cover both.
+CALIBRATION_BANDS = ((0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5),
+                     (0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.0001))
 CALIBRATION_MIN = 10   # separate tries in a band before it is judged
 
 
@@ -315,7 +418,8 @@ def compounded(returns: list[float]) -> float:
 
 def record(briers: list[float | None], results: list[str], returns: list[float],
            clusters: list | None = None, slices: int = 1, long_returns: list[float] | None = None,
-           competitors: int = 1) -> Record:
+           competitors: int = 1, bars: list[float | None] | None = None,
+           fades: list[float | None] | None = None) -> Record:
     """briers/results/clusters are parallel lists over resolved signals; returns covers those with
     a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved under
     rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
@@ -326,14 +430,19 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
     long_returns: what always calling long would have made over the same windows at the same cost.
     competitors: how many ranked agents share the board. Readers pick the best of them, and among K
     coin-flippers the best one looks skilled about K times as often, so the luck odds are multiplied
-    by K (Bonferroni) before the verdict; p_luck_alone keeps the uncorrected odds."""
+    by K (Bonferroni) before the verdict; p_luck_alone keeps the uncorrected odds.
+    bars / fades: each call's bar and fade bar, parallel to briers; None (the list or an entry) is a
+    plain call, whose bar is an even bet. returns and long_returns cover plain calls only."""
     keep = [i for i, r in enumerate(results) if r in ("right", "wrong")]
     scored_b = [briers[i] for i in keep]
     hits = [1 if results[i] == "right" else 0 for i in keep]
     cl = [clusters[i] for i in keep] if clusters is not None else None
     n = len(scored_b)
     flats = sum(1 for r in results if r == "flat")
-    bss = skill_score(scored_b)
+    kb = [EVEN_BAR if bars is None or bars[i] is None else bars[i] for i in keep]
+    kf = [EVEN_BAR if fades is None or fades[i] is None else fades[i] for i in keep]
+    priced = 0 if bars is None else sum(1 for i in keep if bars[i] is not None)
+    bss = skill_score(scored_b, [ref_brier(b, h) for b, h in zip(kb, hits)])
     k = sum(hits)
     hit = k / n if n else 0.0
     cum = 1.0
@@ -351,16 +460,26 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         if sd > 0:
             sharpe = mean / sd   # per call: mean net return over its spread. Not annualised (windows differ) and
             #                      not multiplied by sqrt(n), which would make it a t-statistic that grows with n.
-    batches = _batches(hits, cl)
-    p, p_worse = luck_odds(batches)
+    up, down = call_payoffs(hits, kb, kf)
+    ups, downs = _batch_means(up, cl), _batch_means(down, cl)   # one payoff per try
+    p, p_worse = luck_from(ups, downs)
     p_alone = p
-    bar = slices * max(1, competitors)
-    p, p_worse = min(1.0, p * bar), min(1.0, p_worse * bar)
+    raised = slices * max(1, competitors)
+    p, p_worse = min(1.0, p * raised), min(1.0, p_worse * raised)
     # Ranges hold however often they are checked, count each try once, and face the same raised bar.
-    hlo, hhi = confidence_range([float(h) for h in hits], cl, 0.05 / bar)
-    bs_lo, bs_hi = confidence_range(scored_b, cl, 0.05 / bar)
-    blo, bhi = 1.0 - bs_hi / COIN_FLIP_BS, 1.0 - bs_lo / COIN_FLIP_BS
-    v = verdict(n, len(batches), p, p_worse)
+    hlo, hhi = confidence_range([float(h) for h in hits], cl, 0.05 / raised)
+    mean_bar = sum(kb) / n if n else EVEN_BAR
+    if priced:
+        elo, ehi = edge_range(hits, kb, kf, cl, 0.05 / raised)
+        # A credit lies between -4 and 4 once a call has a price; rescale to 0..1 for the same test.
+        credits = [4.0 * (ref_brier(b, h) - s) for b, h, s in zip(kb, hits, scored_b)]
+        u_lo, u_hi = confidence_range([(4.0 - c) / 8.0 for c in credits], cl, 0.05 / raised)
+        blo, bhi = 4.0 - 8.0 * u_hi, 4.0 - 8.0 * u_lo
+    else:
+        elo, ehi = hlo - EVEN_BAR, hhi - EVEN_BAR
+        bs_lo, bs_hi = confidence_range(scored_b, cl, 0.05 / raised)
+        blo, bhi = 1.0 - bs_hi / COIN_FLIP_BS, 1.0 - bs_lo / COIN_FLIP_BS
+    v = verdict(n, len(ups), p, p_worse)
     nxt = NEXT_STEP.get(v)
     return Record(
         n=n, flats=flats, bss=round(bss, 4), score=round(shrink(bss, n), 4),
@@ -368,16 +487,20 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         cum_return=round(cum - 1.0, 6), sharpe=round(sharpe, 4), max_drawdown=round(mdd, 6),
         p_luck=round(p, 6), hit_rate_low=round(hlo, 4), hit_rate_high=round(hhi, 4),
         bss_low=round(blo, 4), bss_high=round(bhi, 4),
-        tries=len(batches), p_worse=round(p_worse, 6), verdict=v, skill_points=round(bss * 100),
-        next_verdict=nxt, tries_to_next=tries_to_reach(batches, LADDER[nxt] / bar) if nxt else None,
+        tries=len(ups), p_worse=round(p_worse, 6), verdict=v, skill_points=round(bss * 100),
+        next_verdict=nxt, tries_to_next=tries_to_reach_x(ups, LADDER[nxt] / raised) if nxt else None,
         exploratory=slices > 1, competitors=max(1, competitors), p_luck_alone=round(min(1.0, p_alone), 6),
         always_long_return=round(compounded(long_returns or []), 6),
-        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl, 0.05 / bar),
+        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl, 0.05 / raised),
+        bar=round(mean_bar, 4), edge=round(hit - mean_bar, 4) if n else 0.0,
+        edge_low=round(elo, 4), edge_high=round(ehi, 4), priced=priced,
     )
 
 
-def should_delist(recent_briers: list[float]) -> bool:
-    """True when the last DELIST_WINDOW resolved signals score below the delist threshold."""
+def should_delist(recent_briers: list[float], refs: list[float] | None = None) -> bool:
+    """True when the last DELIST_WINDOW resolved signals score below the delist threshold. refs is
+    each call's ref_brier, parallel to recent_briers (None: every bar is an even bet)."""
     if len(recent_briers) < config.DELIST_WINDOW:
         return False
-    return skill_score(recent_briers[-config.DELIST_WINDOW:]) < config.DELIST_BSS
+    w = config.DELIST_WINDOW
+    return skill_score(recent_briers[-w:], None if refs is None else refs[-w:]) < config.DELIST_BSS

@@ -38,7 +38,7 @@ def test_start_is_the_first_sample_after_the_post_never_before(client, session_f
     set_price(session_factory, "BTC", 103.0, when=sig.resolve_at)
     assert service.resolve_due(s, now=sig.resolve_at + dt.timedelta(seconds=1)) == 1
     sig = s.query(Signal).first()
-    assert sig.result == "flat" and sig.scoring_version == 3
+    assert sig.result == "flat" and sig.scoring_version == scoring.SCORING_VERSION == 4
 
 
 def test_hash_commits_to_the_call_and_the_root_to_its_start(client, session_factory):
