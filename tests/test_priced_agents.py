@@ -73,8 +73,8 @@ def test_the_control_buys_all_four_favourites_and_can_earn_nothing(client, sessi
     assert (sealed(rows["BTC"])["side"], sealed(rows["BTC"])["limit"], sealed(rows["BTC"])["confidence"]) == ("yes", 0.72, None)
     assert (sealed(rows["ETH"])["side"], sealed(rows["ETH"])["limit"]) == ("no", 0.78)
     assert sealed(rows["XRP"])["limit"] == 0.95                                       # never bids above the ceiling
-    assert (rows["BTC"].fill, rows["BTC"].bar, rows["ETH"].fill, rows["ETH"].bar) == ("filled", 0.72, "filled", 0.78)
-    assert (rows["XRP"].fill, rows["XRP"].fill_reason) == ("unfilled", "price outside 5c-95c")
+    assert (rows["BTC"].fill, sealed(rows["BTC"])["fill"]["bar"], rows["ETH"].fill, sealed(rows["ETH"])["fill"]["bar"]) == ("filled", 0.72, "filled", 0.78)
+    assert (rows["XRP"].fill, sealed(rows["XRP"])["fill"]["reason"]) == ("unfilled", "price outside 5c-95c")
     s.close()
     for ticker, result in (("KXBTC15M-26NOV111345-45", "yes"), ("KXETH15M-26NOV111345-45", "yes"), ("KXSOL15M-26NOV111345-45", "no")):
         venue.settle(ticker, result)
@@ -122,8 +122,9 @@ def test_a_fresh_bet_becomes_a_priced_call_under_the_new_name(client, session_fa
     assert posted == {f"1@{bet()['timestamp']}"} and list(made) == ["crypto-first-minute"]
     s = session_factory()
     row = s.query(Signal).one()
-    assert (row.kind, row.market, row.fill, row.bar) == ("priced", XRP, "filled", 0.86)
-    assert sealed(row) == {"side": "no", "limit": 0.85, "confidence": 0.90, "salt": sealed(row)["salt"]}
+    assert (row.kind, row.market, row.fill, row.bar) == ("priced", XRP, "filled", None)   # the cost stays sealed while open
+    assert {k: sealed(row)[k] for k in ("side", "limit", "confidence")} == {"side": "no", "limit": 0.85, "confidence": 0.90}
+    assert sealed(row)["fill"]["bar"] == 0.86
     s.close()
     assert bridge.handle(bet(), now, started, posted, client_for) is False    # already posted: nothing happens
     s = session_factory()

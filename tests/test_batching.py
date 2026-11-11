@@ -1,4 +1,5 @@
-"""Calls posted together count as one try. Every expected value here is worked by hand."""
+"""Calls that share market time: counted as one try, and staked from one betting account. Every expected
+value here is worked by hand."""
 import datetime as dt
 
 import pytest
@@ -34,41 +35,56 @@ def test_calls_that_share_market_time_count_once():
 
 
 def mean_bankroll(rights, wrongs):
-    """Hand formula: average over the five stakes of (1+stake)^rights * (1-stake)^wrongs."""
-    stakes = (0.1, 0.2, 0.3, 0.4, 0.5)
-    return sum((1 + s) ** rights * (1 - s) ** wrongs for s in stakes) / len(stakes)
+    """Hand formula for calls one after another: average over the stakes of (1+stake)^rights * (1-stake)^wrongs."""
+    return sum((1 + s) ** rights * (1 - s) ** wrongs for s in scoring.STAKES) / len(scoring.STAKES)
+
+
+def odds(hits):
+    up, down = scoring.call_payoffs(hits)
+    return scoring.luck_from(up, down)
 
 
 def test_one_call_hand_values():
-    # One right: mean(1.1, 1.2, 1.3, 1.4, 1.5) = 1.3 → odds 1/1.3. One wrong: bankroll 0.7 → no evidence.
-    assert scoring.luck_odds([(1, 1)]) == pytest.approx((1 / 1.3, 1.0))
-    assert scoring.luck_odds([(0, 1)]) == pytest.approx((1.0, 1 / 1.3))
-    assert scoring.luck_odds([]) == (1.0, 1.0)
+    # One right: the mean of 1 + stake over the seven stakes is 1.225 → odds 1/1.225. One wrong: no evidence.
+    assert odds([1]) == pytest.approx((1 / 1.225, 1.0))
+    assert odds([0]) == pytest.approx((1.0, 1 / 1.225))
+    assert odds([]) == (1.0, 1.0)
 
 
-def test_three_batches_of_four_all_right():
-    # 12 calls alone: mean((1+s)^12) = 221.79 / 5 = 44.36 → about 1 in 44.
-    # As three batches each fully right: mean((1+s)^3) = 11.375 / 5 = 2.275 → about 1 in 2.3.
-    alone = scoring.luck_odds([(1, 1)] * 12)[0]
-    batched = scoring.luck_odds([(4, 4)] * 3)[0]
-    assert alone == pytest.approx(1 / 44.358, rel=1e-3)
-    assert batched == pytest.approx(1 / 2.275, rel=1e-6)
+def test_twelve_right_alone_and_as_three_windows_of_four():
+    # 12 calls one after another, all right: mean((1+s)^12) = 32.13 → about 1 in 32.
+    briers, results = [0.04] * 12, ["right"] * 12
+    alone = scoring.record(briers, results, [0.0] * 12)
+    assert alone.p_luck == pytest.approx(1 / mean_bankroll(12, 0), rel=1e-5) and alone.tries == 12
+    assert 1 / alone.p_luck == pytest.approx(32.13, rel=1e-3)
+    # The same 12 as three windows of four calls open together. Each window turns cash c into
+    # c x (2 - (1-s)^4): the four stakes add up to 1 - (1-s)^4 of it and each comes back doubled.
+    windows = [win(w * 900, 900) for w in range(3) for _ in range(4)]
+    together = scoring.record(briers, results, [0.0] * 12, scoring.cluster_ids(windows), windows=windows)
+    by_hand = sum((2 - (1 - s) ** 4) ** 3 for s in scoring.STAKES) / len(scoring.STAKES)
+    assert together.p_luck == pytest.approx(1 / by_hand, rel=1e-5) and together.tries == 3
+    assert alone.hit_rate == together.hit_rate == 1.0 and alone.bss == together.bss
+    assert together.verdict == "unproven"               # 3 tries, under 10
+    # Four correlated wins in one window are worth less than four wins in a row.
+    assert together.p_luck > alone.p_luck
 
 
-def test_mixed_batch_sizes():
-    # A batch of 2 fully right counts like one right call; a split batch (1 of 2) is a wash.
-    assert scoring.luck_odds([(2, 2), (1, 1)])[0] == pytest.approx(1 / mean_bankroll(2, 0))
-    assert scoring.luck_odds([(1, 2), (1, 1)])[0] == pytest.approx(1 / 1.3)
+def test_a_split_window_is_close_to_a_wash():
+    # Two calls open together, one right and one wrong, 10% stakes: 0.81 + 0.20 = 1.01 or 0.81 + 0.18 = 0.99.
+    tl = scoring.Timeline([win(0, 900), win(1, 900)])
+    import math
+    assert math.exp(tl.log_cash([1, -1], 0.1)) == pytest.approx(1.01)
+    assert math.exp(tl.log_cash([-1, 1], 0.1)) == pytest.approx(0.99)
 
 
-def test_order_does_not_matter_and_fading_loses_the_verdict():
-    assert scoring.luck_odds([(1, 1)] * 5 + [(0, 1)] * 2) == pytest.approx(scoring.luck_odds([(0, 1), (1, 1)] * 2 + [(1, 1)] * 3))
+def test_order_does_not_matter_for_calls_in_a_row_and_fading_loses_the_verdict():
+    assert odds([1] * 5 + [0] * 2) == pytest.approx(odds([0, 1] * 2 + [1] * 3))
     # 10 right then 10 wrong: (1+s)^10 (1-s)^10 = (1-s^2)^10 < 1 → back to no evidence.
-    assert scoring.luck_odds([(1, 1)] * 10 + [(0, 1)] * 10)[0] == 1.0
+    assert odds([1] * 10 + [0] * 10)[0] == 1.0
 
 
 def test_worse_than_chance_is_the_mirror():
-    assert scoring.luck_odds([(0, 1)] * 12)[1] == pytest.approx(scoring.luck_odds([(1, 1)] * 12)[0])
+    assert odds([0] * 12)[1] == pytest.approx(odds([1] * 12)[0])
 
 
 def test_checking_constantly_cannot_manufacture_skill():
@@ -84,15 +100,15 @@ def test_checking_constantly_cannot_manufacture_skill():
     runs, steps = 300, 300
     fooled_old = fooled_new = 0
     for _ in range(runs):
-        calls, k = [], 0
+        k, logs = 0, [0.0] * len(scoring.STAKES)       # calls in a row: each stake's cash is a running product
         hit_old = hit_new = False
         for t in range(1, steps + 1):
             right = rng.random() < 0.5
             k += right
-            calls.append((1 if right else 0, 1))
+            logs = [v + math.log1p(s if right else -s) for v, s in zip(logs, scoring.STAKES)]
             if not hit_old and t % 5 == 0 and one_look_p(k, t) < 0.05:
                 hit_old = True
-            if not hit_new and scoring.luck_odds(calls)[0] < 0.05:
+            if not hit_new and math.exp(-scoring._log_mean(logs)) < 0.05:
                 hit_new = True
         fooled_old += hit_old
         fooled_new += hit_new
@@ -100,29 +116,14 @@ def test_checking_constantly_cannot_manufacture_skill():
     assert fooled_old / runs > 0.15          # the problem the betting test fixes
 
 
-def test_record_uses_batches_for_luck_and_verdict():
-    # 12 right in 3 batches of 4: hit rate and skill unchanged, luck odds and evidence honest.
-    briers, results = [0.04] * 12, ["right"] * 12
-    alone = scoring.record(briers, results, [0.0] * 12)
-    batched = scoring.record(briers, results, [0.0] * 12, clusters=[0] * 4 + [1] * 4 + [2] * 4)
-    assert alone.hit_rate == batched.hit_rate == 1.0 and alone.bss == batched.bss
-    assert alone.p_luck == pytest.approx(1 / 44.358, rel=1e-3) and alone.tries == 12
-    assert batched.p_luck == pytest.approx(1 / 2.275, rel=1e-5) and batched.tries == 3
-    assert batched.verdict == "unproven"               # 3 tries, under 10
-
-
-def test_batching_only_ever_widens_the_ranges():
-    # Batches that all went the same way: ranges must be at least as wide as treating calls alone.
+def test_batches_only_count_tries():
+    # The same calls with and without batch ids: every number but the count of tries is the same.
     briers = [0.2025] * 8 + [0.3025] * 4
     results = ["right"] * 8 + ["wrong"] * 4
-    clusters = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
     alone = scoring.record(briers, results, [0.0] * 12)
-    batched = scoring.record(briers, results, [0.0] * 12, clusters=clusters)
-    assert batched.hit_rate_low <= alone.hit_rate_low and batched.hit_rate_high >= alone.hit_rate_high
-    assert batched.bss_low <= alone.bss_low and batched.bss_high >= alone.bss_high
-    # every batch its own call → identical to no batching
-    same = scoring.record(briers, results, [0.0] * 12, clusters=list(range(12)))  # each call alone
-    assert (same.p_luck, same.hit_rate_low, same.bss_low) == (alone.p_luck, alone.hit_rate_low, alone.bss_low)
+    batched = scoring.record(briers, results, [0.0] * 12, clusters=[0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    assert (alone.tries, batched.tries) == (12, 3)
+    assert (batched.p_luck, batched.hit_rate_low, batched.bss_low) == (alone.p_luck, alone.hit_rate_low, alone.bss_low)
 
 
 def test_old_rule_flats_no_longer_count():

@@ -21,22 +21,25 @@ averages -1 per signal, a coin-flipper at p=0.5 averages 0, and an honest 80%-ac
 at p=0.8 averages about +0.36. Brier is a proper scoring rule, so honest confidence is the
 credit-maximizing strategy.
 
-Calls posted together count as one try in the luck odds and the ranges. Four coins called in the
-same second move together, so treating them as four independent coin flips overstated how sure a
-record was. Calls an agent posts within a minute of a batch's first call form one batch; each batch
-scores x = (right - wrong) / size, between -1 and +1.
+The luck odds stay honest however often anyone looks, and however an agent times or bunches its
+calls. The room recomputes every minute, and a test built for one look at the end would, checked
+that often, eventually call almost any lucky streak "probably not luck". So the odds come from a
+betting account instead (see Timeline): picture someone following the agent with real money, setting
+aside a fixed fraction of their free cash when each call starts and getting it back, with winnings,
+when the call closes. If the calls carry no information that account is a fair game at best, and
+(Ville's inequality) the chance its cash EVER reaches 20x is at most 1 in 20, no matter when or how
+often it is checked. The luck odds are 1 / cash, averaged over seven stake sizes (2.5% to 50%) so no
+one stake is picked after the fact. Each bet is placed at the call's own odds: a stake on a call with
+bar r returns (1 - r) / r if it wins and is lost if it does not, so a caller who wins exactly as often
+as its bars say breaks even. Using the cash today rather than its peak means a record that fades
+loses its verdict. The same account run on the opposite side says when an agent is reliably worse
+than its bars.
 
-The luck odds stay honest however often anyone looks. The room recomputes every minute, and a test
-built for one look at the end would, checked that often, eventually call almost any lucky streak
-"probably not luck". So the odds come from a betting test instead: picture someone staking a fixed
-fraction of their bankroll on every batch the agent calls. If the calls carry no information, that
-bankroll is a fair game and (Ville's inequality) the chance it EVER reaches 20x is at most 1 in 20,
-no matter when or how often it is checked. The luck odds are 1 / bankroll, averaged over five stake
-sizes (10% to 50%) so no one stake is picked after the fact. Each bet is placed at the call's own
-odds: a stake on a call with bar r returns (1 - r) / r if it wins and is lost if it does not, so a
-caller who wins exactly as often as its bars say breaks even. Using the current bankroll rather than
-its peak means a record that fades loses its verdict. The same test run on the opposite side says
-when an agent is reliably worse than a coin flip.
+Calls that share market time still count as one "try" when tries are counted (four coins called in
+the same second move together), but only for counting: the verdicts need ten separate tries, and a
+calibration band needs ten before it is judged. The odds and the ranges come from the account, where
+every stake is fixed the moment its call starts. Until 2026-11-11 a try's calls were averaged after
+the fact, and an agent could shrink a losing try by adding calls to it.
 """
 from __future__ import annotations
 
@@ -54,6 +57,8 @@ COIN_FLIP_BS = 0.25
 # Record-level changes, no per-signal change (version stays 2):
 #      2026-10-31: calls posted together count as one try; flats scored under 1 left out of aggregates
 #   3  2026-11-05: start price is the first sample after the post
+# Record-level change with rule set 4: the luck odds and ranges come from a betting account whose stakes
+# are fixed when each call starts (Timeline), over seven stake sizes; tries are only counted.
 SCORING_VERSION = 4   # 4 (2026-11-11): every call is judged against its bar (0.5 plain, ask + fee priced)
 
 EVEN_BAR = 0.5        # a plain call's bar, and the fade bar that goes with it
@@ -110,9 +115,8 @@ def shrink(bss: float, n: int) -> float:
 def cluster_ids(windows: list[tuple]) -> list[int]:
     """Batch id per call from its scored window (start, end): a call whose window opens while its
     batch's first call is still open joins that batch, so calls that share market time count as one
-    try. Returned in the input's order; the input need not be sorted. Residual: a late member of a
-    batch may still overlap the next batch's first call; the next batch opens only once the first
-    call of this one has closed."""
+    try. Returned in the input's order; the input need not be sorted. Used only to count tries; the
+    odds and ranges come from the betting account (Timeline), which needs no batches."""
     order = sorted(range(len(windows)), key=lambda i: windows[i])
     ids = [0] * len(windows)
     batch, anchor_end = -1, None
@@ -124,18 +128,10 @@ def cluster_ids(windows: list[tuple]) -> list[int]:
     return ids
 
 
-def _batches(hits: list[int], clusters: list | None) -> list[tuple[int, int]]:
-    """(right, size) per batch. No clusters → every call is its own batch."""
-    if clusters is None:
-        return [(h, 1) for h in hits]
-    agg: dict = {}
-    for h, c in zip(hits, clusters):
-        r, n = agg.get(c, (0, 0))
-        agg[c] = (r + h, n + 1)
-    return list(agg.values())
-
-
-STAKES = (0.1, 0.2, 0.3, 0.4, 0.5)   # fractions of bankroll staked per batch; fixed, never tuned to data
+# Fractions of free cash staked on each call; fixed, never tuned to data. The two smallest (added with
+# the account, 2026-11-11) keep the test sharp for an agent whose calls overlap: four calls open at
+# once at 2.5% each put about 10% at work, as one call at 10% does.
+STAKES = (0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5)
 
 
 def call_payoffs(hits: list[int], bars: list[float] | None = None,
@@ -153,127 +149,182 @@ def call_payoffs(hits: list[int], bars: list[float] | None = None,
     return up, down
 
 
-def _luck(xs: list[float]) -> float:
-    """1 / bankroll after staking each fraction in STAKES on every try's payoff, averaged over the stakes."""
-    logs = [0.0] * len(STAKES)
-    for x in xs:
-        for j, lam in enumerate(STAKES):
-            logs[j] += math.log1p(lam * x)
+BISECTIONS = 24   # halvings when a range's end is searched for: finer than the four places shown
+
+
+class Timeline:
+    """When each call's stake is set aside and when it comes back: the order of a betting account.
+
+    The luck odds and every range come from one picture. Someone follows the agent with real money:
+    when a call starts they set aside a fixed fraction of the cash they have free at that moment, and
+    when the call closes the stake comes back with its winnings (or does not come back). Only cash in
+    hand counts; money riding on open calls counts for nothing until they close.
+
+    The stake is fixed when the call starts, before anything about that call is known, and nothing
+    later can change it. That is what makes the test hold for calls that overlap, move together, or
+    are timed by what the agent has seen: if no call beats its bar on average, the cash plus the fair
+    value of what is riding never grows on average (a supermartingale), cash alone is never more than
+    that, and so (Ville's inequality) the chance the cash ever reaches 20 is at most 1 in 20. Before
+    2026-11-11 overlapping calls were averaged into one "try" after the fact; an agent could then
+    shrink a losing try by adding calls to it (review finding: a coin-flipper was certified every time).
+
+    windows: (start, end) per closed call. pending: the start of each call still open. Calls that
+    close at an instant are paid before calls that start at it."""
+
+    CHUNK = 8   # events between range checks: short enough that no run of wins or losses leaves a float's range
+
+    def __init__(self, windows: list[tuple], pending: list | None = None):
+        self.n = len(windows)
+        events = []
+        for i, (start, end) in enumerate(windows):
+            events.append((start, 1, i))
+            events.append((end, 0, i) if end > start else (start, 2, i))   # a call never closes before it starts
+        for j, start in enumerate(pending or []):
+            events.append((start, 1, self.n + j))
+        events.sort()
+        self.size = self.n + len(pending or [])
+        # i: call i starts. ~i (negative): call i closes. Cut into chunks, each with the calls open at its end.
+        order = [i if kind == 1 else ~i for _, kind, i in events]
+        self.chunks, open_now = [], set()
+        for at in range(0, len(order), self.CHUNK):
+            part = order[at:at + self.CHUNK]
+            for e in part:
+                open_now.add(e) if e >= 0 else open_now.discard(~e)
+            self.chunks.append((part, tuple(open_now)))
+
+    @classmethod
+    def in_order(cls, n: int) -> "Timeline":
+        """n calls one after another, none overlapping: the cash is then a plain running product."""
+        return cls([(i, i + 1) for i in range(n)])
+
+    def log_cash(self, payoffs: list[float], stake: float) -> float:
+        """Log of the cash in hand at the end, staking `stake` of free cash on every call. payoffs is
+        what a unit stake returns per closed call (at least -1; 0 gives the stake back)."""
+        back = [x + 1.0 if x > -1.0 else 0.0 for x in payoffs]   # what a unit stake comes back as
+        held = [0.0] * self.size
+        cash, shift, rest = 1.0, 0.0, 1.0 - stake
+        for part, still_open in self.chunks:
+            for e in part:
+                if e >= 0:
+                    held[e] = stake * cash
+                    cash *= rest
+                else:
+                    cash += held[~e] * back[~e]
+            if not 1e-150 < cash < 1e150:        # keep the arithmetic in range on long records
+                shift += math.log(cash)
+                for k in still_open:
+                    held[k] /= cash
+                cash = 1.0
+        return math.log(cash) + shift
+
+    def log_cashes(self, payoffs: list[float]) -> list[float]:
+        return [self.log_cash(payoffs, stake) for stake in STAKES]
+
+
+def _log_mean(logs: list[float]) -> float:
+    """Log of the average of exp(logs): the account's cash averaged over STAKES, so no one stake is
+    picked after the fact."""
     top = max(logs)
-    log_mean = top + math.log(sum(math.exp(v - top) for v in logs) / len(STAKES))
-    return min(1.0, math.exp(-log_mean))
+    return top + math.log(sum(math.exp(v - top) for v in logs) / len(logs))
 
 
-def luck_from(up: list[float], down: list[float]) -> tuple[float, float]:
-    """(p_skill, p_worse) from one payoff per try on each side: chance a caller with no edge over its
-    bars looks this good / this bad, valid at any stopping time. 1.0 means no evidence either way."""
+def luck_from(up: list[float], down: list[float], timeline: Timeline | None = None) -> tuple[float, float]:
+    """(p_skill, p_worse) from each call's payoff on each side: the chance a caller with no edge over
+    its bars looks this good / this bad, valid at any stopping time. 1.0 means no evidence either way.
+    No timeline: the calls came one after another."""
     if not up:
         return 1.0, 1.0
-    return _luck(up), _luck(down)
+    tl = timeline or Timeline.in_order(len(up))
+    return (min(1.0, math.exp(-_log_mean(tl.log_cashes(up)))),
+            min(1.0, math.exp(-_log_mean(tl.log_cashes(down)))))
 
 
-def luck_odds(batches: list[tuple[int, int]]) -> tuple[float, float]:
-    """luck_from for even-bar calls given as (right, size) per try: each try pays (right - wrong) / size."""
-    up = [(2 * right - size) / size for right, size in batches]
-    return luck_from(up, [-x for x in up])
-
-
-def _batch_means(values: list[float], clusters: list | None) -> list[float]:
-    """One value per try: the mean over the calls in each batch (no clusters: each call is a try)."""
-    if clusters is None:
-        return list(values)
-    agg: dict = {}
-    for v, c in zip(values, clusters):
-        t, n = agg.get(c, (0.0, 0))
-        agg[c] = (t + v, n + 1)
-    return [t / n for t, n in agg.values()]
-
-
-def _wealth(vs: list[float], m: float, side: int) -> float:
-    """Betting test of "the true mean is m", averaged over STAKES. side +1 bets the mean is above m,
-    -1 below. Stakes are scaled so no single try can lose more than the stake (values lie in [0, 1]).
-    At m = 0.5 on hit rates the +1 side is exactly the luck-odds bankroll."""
-    logs = []
-    for c in STAKES:
-        lam = c / m if side > 0 else c / (1.0 - m)
-        logs.append(sum(math.log1p(side * lam * (v - m)) for v in vs))
-    top = max(logs)
-    if top > 700:
-        return math.inf
-    return sum(math.exp(v) for v in logs) / len(logs)
-
-
-def confidence_range(values: list[float], clusters: list | None, alpha: float = 0.05) -> tuple[float, float]:
-    """Range for the true mean of values in [0, 1], one value per try, that holds however often it is
-    checked: a mean m is ruled out once either side's betting bankroll reaches 2 / alpha (Ville's
-    inequality per side, half of alpha each). Each edge is found by bisection on a monotone bankroll."""
-    vs = _batch_means(values, clusters)
-    if not vs:
+def confidence_range(values: list[float | None], timeline: Timeline | None = None,
+                     alpha: float = 0.05) -> tuple[float, float]:
+    """Range for the true mean of values in [0, 1], one per call (None: a call that was not scored,
+    whose stake just comes back), holding however often it is checked. A mean m is ruled out once the
+    account betting "the truth is above m" (or below it) reaches 2 / alpha in cash: Ville's inequality
+    per side, half of alpha each. Stakes are scaled so a call can lose its stake and no more. Each end
+    is found by bisection; the cash only moves one way as m moves."""
+    scored = [v for v in values if v is not None]
+    if not scored:
         return 0.0, 1.0
-    mean = sum(vs) / len(vs)
-    bar = 2.0 / alpha
+    tl = timeline or Timeline.in_order(len(values))
+    mean = sum(scored) / len(scored)
+    goal = math.log(2.0 / alpha)
 
-    def edge(side: int, inside: float, outside: float) -> float:
-        # inside: a mean not ruled out (the sample mean, whose bankroll is at most 1); outside: the end of [0, 1]
-        if _wealth(vs, outside, side) < bar:
+    def ruled_out(m: float, side: int) -> bool:
+        if side > 0:
+            xs = [0.0 if v is None else (v - m) / m for v in values]
+        else:
+            xs = [0.0 if v is None else (m - v) / (1.0 - m) for v in values]
+        return _log_mean(tl.log_cashes(xs)) >= goal
+
+    def end(side: int, outside: float, inside: float) -> float:
+        # outside: the end of [0, 1] this side can rule out; inside: the other end, which it never can
+        if not ruled_out(outside, side):
             return outside
-        for _ in range(60):
+        for _ in range(BISECTIONS):
             mid = (inside + outside) / 2
-            if _wealth(vs, mid, side) >= bar:
+            if ruled_out(mid, side):
                 outside = mid
             else:
                 inside = mid
         return outside
 
     eps = 1e-9
-    return edge(+1, mean, eps) if mean > eps else 0.0, edge(-1, mean, 1 - eps) if mean < 1 - eps else 1.0
+    low = end(+1, eps, 1 - eps) if mean > eps else 0.0
+    high = end(-1, 1 - eps, eps) if mean < 1 - eps else 1.0
+    return min(low, mean), max(high, mean)
 
 
-def _wealth_x(xs: list[float]) -> float:
-    """Mean bankroll over STAKES after staking on each try's payoff (each payoff is at least -1)."""
-    logs = [sum(math.log1p(lam * x) for x in xs) for lam in STAKES]
-    if max(logs) > 700:
-        return math.inf
-    return sum(math.exp(v) for v in logs) / len(logs)
+def _shifted(bar: float, theta: float) -> float:
+    """A bar moved theta of the way to 1 (theta > 0) or to 0 (theta < 0): always a chance strictly
+    between 0 and 1, whatever the bar."""
+    return bar + theta * (1.0 - bar) if theta >= 0 else bar * (1.0 + theta)
 
 
-def edge_range(hits: list[int], bars: list[float], fades: list[float], clusters: list | None,
+def edge_range(hits: list[int | None], bars: list[float], timeline: Timeline | None = None,
                alpha: float = 0.05) -> tuple[float, float]:
     """Range for how far the true win rate sits above the bars, holding however often it is checked.
-    A shift d is ruled out at the low end once betting on the calls at bars raised by d reaches a
-    bankroll of 2 / alpha, and at the high end once betting against them at fade bars raised by d does.
-    With every bar at 0.5 this is confidence_range on the hit rate, minus 0.5."""
-    if not hits:
+    Every bar is moved the same share of the way toward 1 or toward 0; a move is ruled out once the
+    account betting on the calls at the moved bars (the low end) or against them (the high end) reaches
+    2 / alpha. Each end is reported as the mean moved bar minus the mean bar, and the range always holds
+    the edge seen. hits: 1, 0, or None for a call that was not scored. With every bar at 0.5 this is
+    confidence_range on the hit rate, minus 0.5."""
+    scored = [i for i, h in enumerate(hits) if h is not None]
+    if not scored:
         return -1.0, 1.0
-    limit = 2.0 / alpha
-    eps = 1e-9
+    tl = timeline or Timeline.in_order(len(hits))
+    goal = math.log(2.0 / alpha)
+    mean_bar = sum(bars[i] for i in scored) / len(scored)
+    seen = sum(hits[i] for i in scored) / len(scored) - mean_bar
 
-    def up(d: float) -> float:      # falls as d rises
-        return _wealth_x(_batch_means([(h - (r + d)) / (r + d) for h, r in zip(hits, bars)], clusters))
+    def moved(theta: float) -> float:
+        return sum(_shifted(bars[i], theta) for i in scored) / len(scored) - mean_bar
 
-    def down(d: float) -> float:    # rises as d rises
-        return _wealth_x(_batch_means([((f + d) - h) / (1.0 - (f + d)) for h, f in zip(hits, fades)], clusters))
+    def ruled_out(theta: float, side: int) -> bool:
+        xs = []
+        for h, r in zip(hits, bars):
+            q = _shifted(r, theta)
+            xs.append(0.0 if h is None else ((h - q) / q if side > 0 else (q - h) / (1.0 - q)))
+        return _log_mean(tl.log_cashes(xs)) >= goal
 
-    def cross(wealth, inside: float, outside: float) -> float:
-        # outside: the far end of what the bars allow; inside: a shift the test does not rule out.
-        if wealth(outside) < limit:
+    def end(side: int, outside: float, inside: float) -> float:
+        # outside: the far move this side can rule out; inside: the opposite one, which it never can
+        if not ruled_out(outside, side):
             return outside
-        for _ in range(60):          # move inside toward the centre until it really is inside
-            if wealth(inside) < limit:
-                break
-            inside = (inside + centre) / 2
-        for _ in range(60):
+        for _ in range(BISECTIONS):
             mid = (inside + outside) / 2
-            if wealth(mid) >= limit:
+            if ruled_out(mid, side):
                 outside = mid
             else:
                 inside = mid
         return outside
 
-    hit = sum(hits) / len(hits)
-    low_end, high_end = -min(bars) + eps, 1.0 - max(fades) - eps
-    centre = min(high_end, max(low_end, hit - sum(bars) / len(bars)))
-    return cross(up, centre, low_end), cross(down, min(high_end, max(low_end, hit - sum(fades) / len(fades))), high_end)
+    eps = 1e-9
+    low, high = moved(end(+1, -1.0 + eps, 1.0 - eps)), moved(end(-1, 1.0 - eps, -1.0 + eps))
+    return min(low, seen), max(high, seen)
 
 
 MIN_TRIES = 10   # separate tries before any verdict but "unproven"
@@ -302,33 +353,31 @@ def verdict(n: int, tries: int, p: float, p_worse: float) -> str:
 NEXT_STEP = {"unproven": "probably_not_luck", "luck": "probably_not_luck", "probably_not_luck": "proven"}
 
 
-def tries_to_reach_x(xs: list[float], target_p: float, cap: int = 20000) -> int | None:
-    """How many more tries until the luck odds drop under target_p, if the next stretch looks like
-    the record so far (history replayed in a loop). xs is one payoff per try. None when the record is
-    not heading there."""
-    if not xs:
-        return None
-    logs = [sum(math.log1p(lam * x) for x in xs) for lam in STAKES]   # today, and the gain per replay
-    if max(logs) <= 0:
+def tries_to_reach(logs: list[float], tries: int, target_p: float, cap: int = 20000) -> int | None:
+    """How many more tries until the luck odds drop under target_p, if the next stretch looks like the
+    record so far. logs is the account's log cash per stake today (Timeline.log_cashes) over `tries`
+    tries; living the record again multiplies each stake's cash by itself. None when the record is not
+    heading there within cap tries."""
+    if not logs or tries <= 0 or max(logs) <= 0:
         return None
     goal = math.log(1 / target_p)
-
-    def log_mean(v):
-        top = max(v)
-        return top + math.log(sum(math.exp(u - top) for u in v) / len(v))
-    if log_mean(logs) >= goal:
+    if _log_mean(logs) >= goal:
         return 0
-    for step in range(1, cap + 1):
-        x = xs[(step - 1) % len(xs)]
-        logs = [v + math.log1p(lam * x) for v, lam in zip(logs, STAKES)]
-        if log_mean(logs) >= goal:
-            return step
-    return None
 
+    def reached(replays: float) -> bool:
+        return _log_mean([v * (1.0 + replays) for v in logs]) >= goal
 
-def tries_to_reach(batches: list[tuple[int, int]], target_p: float, cap: int = 20000) -> int | None:
-    """tries_to_reach_x for even-bar calls given as (right, size) per try."""
-    return tries_to_reach_x([(2 * r - n) / n for r, n in batches], target_p, cap)
+    far = cap / tries
+    if not reached(far):
+        return None
+    near = 0.0
+    for _ in range(48):
+        mid = (near + far) / 2
+        if reached(mid):
+            far = mid
+        else:
+            near = mid
+    return max(1, math.ceil(far * tries - 1e-9))
 
 
 @dataclass
@@ -349,7 +398,7 @@ class Record:
     hit_rate_high: float = 1.0
     bss_low: float = -1.0
     bss_high: float = 1.0
-    tries: int = 0       # independent tries: calls posted together count once
+    tries: int = 0       # separate tries: calls that share market time count once
     p_worse: float = 1.0  # the same test the other way: chance a coin flip does this badly
     verdict: str = "unproven"
     skill_points: int = 0          # skill on a readable scale: BSS x 100, 0 = coin flip
@@ -375,26 +424,29 @@ CALIBRATION_MIN = 10   # separate tries in a band before it is judged
 
 
 def confidence_from(brier_score: float, result: str) -> float:
-    """Stated confidence, recovered exactly from a call's Brier: right → (1-c)^2, wrong → c^2."""
+    """Stated confidence, recovered from a call's Brier: right → (1-c)^2, wrong → c^2. Rounded to the six
+    places a Brier is stored at, so a stated 0.20 never lands a hair under 0.20 and in the wrong band."""
     root = math.sqrt(brier_score)
-    return 1.0 - root if result == "right" else root
+    return round(1.0 - root if result == "right" else root, 6)
 
 
-def calibration(confs: list[float], hits: list[int], clusters: list | None, alpha: float = 0.05) -> list[dict]:
+def calibration(confs: list[float], hits: list[int], clusters: list | None, alpha: float = 0.05,
+                windows: list[tuple] | None = None) -> list[dict]:
     """For each confidence band: how sure the agent said it was vs how often it was right, with a
-    range on the actual rate that holds however often it is checked (batched calls count once). An agent whose stated confidence sits
+    range on the actual rate that holds however often it is checked (the same betting account, run on
+    the band's calls alone; windows None: one after another). An agent whose stated confidence sits
     outside that range is overconfident or underconfident in that band."""
     out = []
     for lo, hi in CALIBRATION_BANDS:
         idx = [i for i, c in enumerate(confs) if lo <= c < hi]
         if not idx:
             continue
-        cl = [clusters[i] for i in idx] if clusters is not None else None
         h = [hits[i] for i in idx]
-        tries = len(set(cl)) if cl is not None else len(idx)
+        tries = len({clusters[i] for i in idx}) if clusters is not None else len(idx)
         stated = sum(confs[i] for i in idx) / len(idx)
         actual = sum(h) / len(h)
-        low, high = confidence_range([float(x) for x in h], cl, alpha)
+        tl = Timeline([windows[i] for i in idx]) if windows is not None else None
+        low, high = confidence_range([float(x) for x in h], tl, alpha)
         if tries < CALIBRATION_MIN:
             judged = "too few"
         elif stated > high:
@@ -419,11 +471,15 @@ def compounded(returns: list[float]) -> float:
 def record(briers: list[float | None], results: list[str], returns: list[float],
            clusters: list | None = None, slices: int = 1, long_returns: list[float] | None = None,
            competitors: int = 1, bars: list[float | None] | None = None,
-           fades: list[float | None] | None = None) -> Record:
-    """briers/results/clusters are parallel lists over resolved signals; returns covers those with
-    a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved under
-    rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
-    clusters: batch id per signal (see cluster_ids); None treats every call as independent.
+           fades: list[float | None] | None = None, windows: list[tuple] | None = None,
+           pending: list | None = None) -> Record:
+    """briers/results/clusters/windows are parallel lists over resolved signals; returns covers those
+    with a net return. Only right/wrong calls are scored: a flat is never scored, even one resolved
+    under rule set 1 that carries a Brier (the one-time 2026-10-31 cleanup; it can only lower a record).
+    windows: each call's scored window (start, end), which sets when its stake leaves and returns to
+    the betting account (see Timeline). None: the calls came one after another. A flat's stake simply
+    comes back. pending: the start of each call still open; its stake is out and counts for nothing yet.
+    clusters: batch id per signal (see cluster_ids), used only to count separate tries.
     slices: how many slices of the agent's record this one is one of (e.g. 4 coins). Looking at many
     slices and keeping the best is how a lucky slice gets mistaken for skill, so the luck odds are
     multiplied by the number of slices (Bonferroni) and the record is marked exploratory.
@@ -460,38 +516,50 @@ def record(briers: list[float | None], results: list[str], returns: list[float],
         if sd > 0:
             sharpe = mean / sd   # per call: mean net return over its spread. Not annualised (windows differ) and
             #                      not multiplied by sqrt(n), which would make it a t-statistic that grows with n.
+    # The betting account: every right/wrong/flat call takes a stake when it starts. A flat pays it back.
+    staked = [i for i, r in enumerate(results) if r in ("right", "wrong", "flat")]
+    timeline = Timeline([windows[i] for i in staked], pending) if windows is not None else Timeline.in_order(len(staked))
+    at = {i: j for j, i in enumerate(keep)}          # a staked call's place among the scored ones
+
+    def spread(per_scored: list[float], unscored=0.0) -> list:
+        """One value per staked call from one per scored call."""
+        return [per_scored[at[i]] if i in at else unscored for i in staked]
+
     up, down = call_payoffs(hits, kb, kf)
-    ups, downs = _batch_means(up, cl), _batch_means(down, cl)   # one payoff per try
-    p, p_worse = luck_from(ups, downs)
+    log_up, log_down = timeline.log_cashes(spread(up)), timeline.log_cashes(spread(down))
+    p = min(1.0, math.exp(-_log_mean(log_up))) if n else 1.0
+    p_worse = min(1.0, math.exp(-_log_mean(log_down))) if n else 1.0
     p_alone = p
     raised = slices * max(1, competitors)
     p, p_worse = min(1.0, p * raised), min(1.0, p_worse * raised)
-    # Ranges hold however often they are checked, count each try once, and face the same raised bar.
-    hlo, hhi = confidence_range([float(h) for h in hits], cl, 0.05 / raised)
+    tries = (len(set(cl)) if cl is not None else n)
+    # Ranges hold however often they are checked, come from the same account, and face the same raised bar.
+    hlo, hhi = confidence_range(spread([float(h) for h in hits], None), timeline, 0.05 / raised)
     mean_bar = sum(kb) / n if n else EVEN_BAR
     if priced:
-        elo, ehi = edge_range(hits, kb, kf, cl, 0.05 / raised)
+        elo, ehi = edge_range(spread(hits, None), spread(kb, EVEN_BAR), timeline, 0.05 / raised)
         # A credit lies between -4 and 4 once a call has a price; rescale to 0..1 for the same test.
         credits = [4.0 * (ref_brier(b, h) - s) for b, h, s in zip(kb, hits, scored_b)]
-        u_lo, u_hi = confidence_range([(4.0 - c) / 8.0 for c in credits], cl, 0.05 / raised)
+        u_lo, u_hi = confidence_range(spread([(4.0 - c) / 8.0 for c in credits], None), timeline, 0.05 / raised)
         blo, bhi = 4.0 - 8.0 * u_hi, 4.0 - 8.0 * u_lo
     else:
         elo, ehi = hlo - EVEN_BAR, hhi - EVEN_BAR
-        bs_lo, bs_hi = confidence_range(scored_b, cl, 0.05 / raised)
+        bs_lo, bs_hi = confidence_range(spread(scored_b, None), timeline, 0.05 / raised)
         blo, bhi = 1.0 - bs_hi / COIN_FLIP_BS, 1.0 - bs_lo / COIN_FLIP_BS
-    v = verdict(n, len(ups), p, p_worse)
+    v = verdict(n, tries, p, p_worse)
     nxt = NEXT_STEP.get(v)
     return Record(
-        n=n, flats=flats, bss=round(bss, 4), score=round(shrink(bss, n), 4),
+        n=n, flats=flats, bss=round(bss, 4) + 0.0, score=round(shrink(bss, n), 4) + 0.0,
         ranked=n >= config.MIN_RESOLVED_FOR_RANK, hit_rate=round(hit, 4),
         cum_return=round(cum - 1.0, 6), sharpe=round(sharpe, 4), max_drawdown=round(mdd, 6),
         p_luck=round(p, 6), hit_rate_low=round(hlo, 4), hit_rate_high=round(hhi, 4),
         bss_low=round(blo, 4), bss_high=round(bhi, 4),
-        tries=len(ups), p_worse=round(p_worse, 6), verdict=v, skill_points=round(bss * 100),
-        next_verdict=nxt, tries_to_next=tries_to_reach_x(ups, LADDER[nxt] / raised) if nxt else None,
+        tries=tries, p_worse=round(p_worse, 6), verdict=v, skill_points=round(bss * 100),
+        next_verdict=nxt, tries_to_next=tries_to_reach(log_up, tries, LADDER[nxt] / raised) if nxt and n else None,
         exploratory=slices > 1, competitors=max(1, competitors), p_luck_alone=round(min(1.0, p_alone), 6),
         always_long_return=round(compounded(long_returns or []), 6),
-        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl, 0.05 / raised),
+        calibration=calibration([confidence_from(b, results[i]) for b, i in zip(scored_b, keep)], hits, cl, 0.05 / raised,
+                                [windows[i] for i in keep] if windows is not None else None),
         bar=round(mean_bar, 4), edge=round(hit - mean_bar, 4) if n else 0.0,
         edge_low=round(elo, 4), edge_high=round(ehi, 4), priced=priced,
     )

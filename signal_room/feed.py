@@ -132,8 +132,9 @@ def sealed_priced(signal_id: str | None) -> dict | None:
             if not sig:
                 return None
             body = unseal(sig.agent_id, sig.body_cipher)
-            return {"side": body["side"], "limit": float(body["limit"]), "ask": sig.fill_ask, "bar": sig.bar,
-                    "reason": sig.fill_reason or ""}
+            seen = body.get("fill") or {"ask": sig.fill_ask, "bar": sig.bar, "reason": sig.fill_reason}
+            return {"side": body["side"], "limit": float(body["limit"]), "ask": seen["ask"], "bar": seen["bar"],
+                    "reason": seen["reason"] or ""}
         finally:
             db.close()
     except Exception:

@@ -185,7 +185,9 @@ def make_engine(url: str | None = None):
         # Wait up to 30 s for a writer to finish instead of SQLite's 5 s default: the API, the tick and the
         # anchor thread all write, and four posts failed "database is locked" on 2026-11-05 at 02:09.
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
-    engine = create_engine(url, **kwargs)
+    # hide_parameters: a failed statement is logged without its values, which on a priced call would
+    # include what the room saw at the venue while the call is still open.
+    engine = create_engine(url, hide_parameters=True, **kwargs)
     if url.startswith("sqlite"):
         @event.listens_for(engine, "connect")
         def _pragma(dbapi_conn, _):

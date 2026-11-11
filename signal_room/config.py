@@ -40,6 +40,7 @@ PRICED_MIN_SIZE = 10.0            # contracts on offer at the price (history fal
 PRICED_MIN_PRICE = 0.05
 PRICED_MAX_PRICE = 0.95
 PRICED_MIN_SECONDS_LEFT = 60
+PRICED_FILL_WAIT_SECONDS = 1800   # a priced call whose price still cannot be established this long after its post is void
 
 RATE_LIMIT_PER_MINUTE = 60
 REGISTRATIONS_PER_HOUR = 20   # completed registrations; interim brake on free starter credits until membership gates registration

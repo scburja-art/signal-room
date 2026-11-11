@@ -20,12 +20,16 @@ def test_verdict_ladder():
 
 
 def test_progress_projection_hand_values():
-    # Every try right, one so far. Bankroll after k: mean((1+s)^k). k=9 → 77.2/5 = 15.4 (< 20);
-    # k=10 → 109.2/5 = 21.8 (>= 20). So 9 more tries to get under 1 in 20.
-    assert scoring.tries_to_reach([(1, 1)], 0.05) == 9
+    import math
+    # Every try right, one so far. Bankroll after k tries: mean((1+s)^k) over the seven stakes.
+    # k=10 → 112.1/7 = 16.0 (< 20); k=11 → 158.2/7 = 22.6 (>= 20). So 10 more tries to get under 1 in 20.
+    one_right = [math.log(1 + s) for s in scoring.STAKES]
+    assert scoring.tries_to_reach(one_right, 1, 0.05) == 10
     # Right then wrong, replayed: each pair multiplies by (1-s^2) < 1. Never gets there.
-    assert scoring.tries_to_reach([(1, 1), (0, 1)], 0.05) is None
-    assert scoring.tries_to_reach([], 0.05) is None
+    assert scoring.tries_to_reach([math.log((1 + s) * (1 - s)) for s in scoring.STAKES], 2, 0.05) is None
+    assert scoring.tries_to_reach([], 0, 0.05) is None
+    # Already there: nothing more needed.
+    assert scoring.tries_to_reach([math.log(1 + s) * 12 for s in scoring.STAKES], 12, 0.05) == 0
 
 
 def test_slices_raise_the_bar():
@@ -41,12 +45,11 @@ def test_slices_raise_the_bar():
 def test_record_carries_uncertainty():
     rec = scoring.record([0.04] * 18 + [0.64] * 7, ["right"] * 18 + ["wrong"] * 7, [0.0] * 25)
     assert rec.n == 25 and rec.hit_rate == pytest.approx(0.72)
-    # 18 right, 7 wrong, each alone. Hand formula: mean over stakes s of (1+s)^18 (1-s)^7 ≈ 8.20,
-    # so luck odds ≈ 0.122. The old one-look test said 0.0216 ("suggestive"); checked every minute
+    # 18 right, 7 wrong, one after another. Hand formula: mean over stakes s of (1+s)^18 (1-s)^7 ≈ 6.28,
+    # so luck odds ≈ 0.159. The old one-look test said 0.0216 ("suggestive"); checked every minute
     # that was not honest. Now: no evidence yet.
-    stakes = (0.1, 0.2, 0.3, 0.4, 0.5)
-    bankroll = sum((1 + s) ** 18 * (1 - s) ** 7 for s in stakes) / 5
-    assert rec.p_luck == pytest.approx(1 / bankroll, rel=1e-4) and 0.11 < rec.p_luck < 0.13
+    bankroll = sum((1 + s) ** 18 * (1 - s) ** 7 for s in scoring.STAKES) / len(scoring.STAKES)
+    assert rec.p_luck == pytest.approx(1 / bankroll, rel=1e-4) and 0.15 < rec.p_luck < 0.17
     assert rec.verdict == "unproven"                       # also under 30 scored
     assert rec.bss_low < rec.bss < rec.bss_high
     lucky = scoring.record([0.04] * 4, ["right"] * 4, [0.0] * 4)
@@ -97,7 +100,7 @@ def test_migration_backfills_versions(tmp_path):
 
 
 def test_calibration_bands_hand_values():
-    # 20 calls at 0.90, half right: said 90%, was 50% (always-valid range about 21–79%) → overconfident.
+    # 20 calls at 0.90, half right: said 90%, was 50% (always-valid range about 20–80%) → overconfident.
     # 20 calls at 0.55, 11 right: said 55%, was 55% → ok. 5 calls at 0.70 → too few to judge.
     def b(c, right):
         return (c - 1.0) ** 2 if right else c ** 2
@@ -110,7 +113,7 @@ def test_calibration_bands_hand_values():
     assert bands["90%-100%"]["stated"] == pytest.approx(0.90) and bands["90%-100%"]["actual"] == 0.5
     assert bands["90%-100%"]["judged"] == "overconfident"
     lo, hi = bands["90%-100%"]["actual_low"], bands["90%-100%"]["actual_high"]
-    assert lo == pytest.approx(1 - hi, abs=1e-4) and 0.20 < lo < 0.22 and hi < 0.90
+    assert lo == pytest.approx(1 - hi, abs=1e-4) and 0.19 < lo < 0.21 and hi < 0.90
     assert bands["50%-60%"]["judged"] == "ok" and bands["50%-60%"]["actual"] == 0.55
     assert bands["70%-80%"]["judged"] == "too few" and bands["70%-80%"]["calls"] == 5
 

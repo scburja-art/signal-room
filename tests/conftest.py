@@ -60,6 +60,8 @@ def venue(monkeypatch):
     from tests.kalshi_fake import FakeKalshi
     fake = FakeKalshi()
     monkeypatch.setattr(kalshi, "_http", fake.client())
+    from agents import verify
+    monkeypatch.setattr(verify, "_kalshi_http", fake.client())   # the outside checker has its own reader
     kalshi._series_ok.clear()
     yield fake
     kalshi._series_ok.clear()

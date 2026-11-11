@@ -217,6 +217,7 @@ def priced_day(client, factory, venue, clock):
     assert call(author, market=BTC).json()["fill"] == "unfilled"
     # Kalshi's history of that minute: NO was offered between 84c and 90c.
     venue.add_minute(XRP, T0 + dt.timedelta(minutes=2), yes_bid=(0.10, 0.16), yes_ask=(0.11, 0.17))
+    venue.add_minute(BTC, T0 + dt.timedelta(minutes=2), yes_bid=(0.10, 0.15), yes_ask=(0.11, 0.16))   # NO: 85c to 90c
     venue.settle(BTC, "no")
     close_market(venue, clock, factory, "no")
     return filled, *anchor(factory)
@@ -271,7 +272,7 @@ def test_a_price_kalshi_never_showed_is_caught_even_if_the_room_was_consistent(c
     sig = s.get(Signal, filled)
     sig.fill_ask, sig.bar = 0.60, 0.62
     body = service.unseal(sig.agent_id, sig.body_cipher)
-    sig.leaf = priced_leaf(sig.hash, body["salt"], service.fill_record(sig))
+    sig.leaf = priced_leaf(sig.hash, body["salt"], service.fill_record(sig, body))
     s.commit()
     s.close()
     day, chain = anchor(session_factory)
@@ -296,6 +297,7 @@ def test_kalshi_unreachable_is_said_plainly_not_passed_off_as_checked(client, se
     _, day, chain = priced_day(client, session_factory, venue, clock)
     venue.down = True
     r = check(client, day, chain)
-    assert r["venue_unreachable"] == 1 and r["venue_checked"] == 1      # the unfilled call needs no look at Kalshi
-    assert "could not be reached for 1 priced calls" in verify.report(r)
-    assert r["ok"]                                                      # the record itself is still intact
+    assert r["venue_unreachable"] == 2 and r["venue_checked"] == 0
+    assert "could not be reached for 2 priced calls" in verify.report(r)
+    assert r["intact"] and not r["ok"]                                  # intact, but not verified until Kalshi is asked
+    assert "NOT YET" in verify.report(r) and "VERIFIED:" not in verify.report(r)

@@ -1,8 +1,9 @@
 """Rule set 4: every call is judged against its bar (what it cost).
 
 Three things are pinned here: the worked examples from the approved proposal, to the cent; that a
-record of plain calls gets exactly the numbers rule set 3 gave it; and that a caller with no edge
-over its prices is almost never labelled, however often it is checked.
+record of plain calls keeps exactly the credits, skill, score and hit rate rule set 3 gave it (the
+luck odds and ranges moved to the betting account, see test_account.py); and that a caller with no
+edge over its prices is almost never labelled, however often it is checked.
 """
 import dataclasses
 import math
@@ -42,12 +43,12 @@ def test_example_4_a_plain_call_is_an_even_bet_as_before():
     assert bankroll([1.0]) == pytest.approx(110.0) and bankroll([-1.0]) == pytest.approx(90.0)
 
 
-def test_example_5_two_calls_in_one_window_are_one_try():
-    # BTC NO at a cost of 80c wins, ETH NO at a cost of 70c loses; the $10 stake is split $5 each.
+def test_example_5_two_calls_in_one_window_share_one_account():
+    # BTC NO at a cost of 80c wins, ETH NO at a cost of 70c loses, both open at once. Of $100 at 10% stakes
+    # BTC takes $10 and ETH 10% of the $90 left, $9. BTC's $10 comes back as $12.50: $81 + $12.50 = $93.50.
     up, _ = scoring.call_payoffs([1, 0], [0.80, 0.70], [0.76, 0.66])
-    one_try = scoring._batch_means(up, ["w", "w"])
-    assert one_try == [pytest.approx((0.25 - 1.0) / 2)]
-    assert round(bankroll(one_try), 2) == 96.25
+    tl = scoring.Timeline([(0, 15), (1, 15)])
+    assert round(100 * math.exp(tl.log_cash(up, 0.1)), 2) == 93.50
 
 
 def test_example_8_claiming_an_edge_you_do_not_have_costs_credits():
@@ -106,29 +107,37 @@ def random_plain_record(rng):
     return briers, results, returns, clusters, longs
 
 
+# What rule set 4 leaves exactly as it was for a record of plain calls. The luck odds, the ranges and the
+# projection now come from the betting account and are pinned by hand in test_account.py and test_ranges.py.
+UNCHANGED = ("n", "flats", "bss", "score", "ranked", "hit_rate", "cum_return", "sharpe", "max_drawdown", "tries",
+             "skill_points", "competitors", "exploratory", "always_long_return")
+
+
 @pytest.mark.parametrize("seed", range(40))
-def test_a_record_of_plain_calls_is_unchanged_to_the_last_digit(seed):
+def test_a_record_of_plain_calls_keeps_its_skill_score_and_counts_to_the_last_digit(seed):
     rng = random.Random(seed)
     briers, results, returns, clusters, longs = random_plain_record(rng)
     slices, field = rng.choice([1, 1, 4]), rng.choice([1, 4, 9])
     was = dataclasses.asdict(old.record(briers, results, returns, clusters if seed % 3 else None, slices, longs, field))
     now = dataclasses.asdict(scoring.record(briers, results, returns, clusters if seed % 3 else None, slices, longs, field))
-    for key, value in was.items():
-        assert now[key] == value, key
+    for key in UNCHANGED:
+        assert now[key] == was[key], key
+    for band_was, band_now in zip(was["calibration"], now["calibration"]):
+        for key in ("band", "calls", "tries", "stated", "actual"):
+            assert band_now[key] == band_was[key], key
+    assert len(was["calibration"]) == len(now["calibration"])
     # The new fields say the same thing in the new words.
     assert now["bar"] == 0.5 and now["priced"] == 0
     if now["n"]:
         assert now["edge"] == pytest.approx(now["hit_rate"] - 0.5, abs=1e-4)
         assert now["edge_low"] == pytest.approx(now["hit_rate_low"] - 0.5, abs=1e-4)
         assert now["edge_high"] == pytest.approx(now["hit_rate_high"] - 0.5, abs=1e-4)
+        assert now["hit_rate_low"] <= now["hit_rate"] <= now["hit_rate_high"]
 
 
 @pytest.mark.parametrize("seed", range(10))
 def test_plain_helpers_match_rule_set_3_exactly(seed):
     rng = random.Random(100 + seed)
-    batches = [(rng.randrange(0, s + 1), s) for s in (rng.randrange(1, 5) for _ in range(rng.randrange(1, 120)))]
-    assert scoring.luck_odds(batches) == old.luck_odds(batches)
-    assert scoring.tries_to_reach(batches, 0.05) == old.tries_to_reach(batches, 0.05)
     briers = [round(rng.random(), 6) for _ in range(rng.randrange(1, 150))]
     assert scoring.skill_score(briers) == old.skill_score(briers)
     assert scoring.should_delist(briers) == old.should_delist(briers)
@@ -218,16 +227,39 @@ def test_a_real_edge_over_the_price_is_found_and_a_missing_one_is_not():
 def test_edge_range_holds_its_ground():
     rng = random.Random(11)
     bars = [rng.uniform(0.5, 0.9) for _ in range(400)]
-    fades = [b - 0.03 for b in bars]
     hits = [1 if rng.random() < b + 0.06 else 0 for b in bars]
-    lo, hi = scoring.edge_range(hits, bars, fades, None)
+    lo, hi = scoring.edge_range(hits, bars)
     observed = sum(hits) / 400 - sum(bars) / 400
     assert lo < observed < hi and lo > -0.15 and hi < 0.25
-    # Calls made together count once: every call repeated four times inside its own try changes nothing.
-    four = [i for i in range(400) for _ in range(4)]
-    again = scoring.edge_range([hits[i] for i in four], [bars[i] for i in four], [fades[i] for i in four], four)
-    assert again == pytest.approx((lo, hi), abs=1e-9)
-    assert scoring.edge_range([], [], [], None) == (-1.0, 1.0)
+    # A call that was not scored only gets its stake back: it moves nothing.
+    assert scoring.edge_range(hits + [None], bars + [0.7]) == pytest.approx((lo, hi), abs=1e-6)
+    assert scoring.edge_range([], []) == (-1.0, 1.0)
+
+
+def test_edge_range_with_every_bar_even_is_the_hit_rate_range_less_a_half():
+    rng = random.Random(12)
+    hits = [1 if rng.random() < 0.6 else 0 for _ in range(200)]
+    lo, hi = scoring.confidence_range([float(h) for h in hits])
+    elo, ehi = scoring.edge_range(hits, [0.5] * 200)
+    assert (elo, ehi) == pytest.approx((lo - 0.5, hi - 0.5), abs=1e-5)
+
+
+def test_edge_range_holds_the_edge_seen_however_far_apart_the_bars_are():
+    """Review finding 2026-11-11: with bars of 6c and 96c the old range was pinned between -0.06 and +0.07
+    whatever the record said, and left the edge it had just measured outside."""
+    # 6c long shots that win 33% of the time, 96c favourites that win 0%.
+    bars = [0.06] * 100 + [0.96] * 100
+    hits = [1] * 33 + [0] * 67 + [0] * 100
+    lo, hi = scoring.edge_range(hits, bars)
+    seen = sum(hits) / 200 - 0.51
+    assert seen == pytest.approx(-0.345) and lo <= seen <= hi
+    rng = random.Random(13)
+    for _ in range(60):
+        n = rng.randrange(5, 120)
+        bars = [rng.choice([0.06, 0.3, 0.5, 0.8, 0.96]) for _ in range(n)]
+        hits = [1 if rng.random() < rng.random() else 0 for _ in range(n)]
+        lo, hi = scoring.edge_range(hits, bars)
+        assert lo <= sum(hits) / n - sum(bars) / n <= hi and -1.0 <= lo <= hi <= 1.0
 
 
 def test_mixed_record_counts_each_call_against_its_own_bar():
@@ -238,7 +270,7 @@ def test_mixed_record_counts_each_call_against_its_own_bar():
     assert rec.priced == 30 and rec.n == 60
     assert rec.bar == pytest.approx(0.55) and rec.edge == pytest.approx(rec.hit_rate - 0.55, abs=1e-4)
     plain_only = scoring.record(briers[:30], results[:30], [])
-    assert plain_only.p_luck == 1.0 and rec.p_luck < 0.05
+    assert plain_only.p_luck == 1.0 and rec.p_luck < 0.06 and rec.edge_low < rec.edge < rec.edge_high
 
 
 def test_delisting_uses_the_bar():
