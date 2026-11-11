@@ -281,3 +281,49 @@ def test_record_passes_the_posting_order_through():
     first = scoring.record(briers, results, [], windows=[(0, 15), (0, 15)], order=[1, 2])
     second = scoring.record(briers, results, [], windows=[(0, 15), (0, 15)], order=[2, 1])
     assert first.p_luck_alone != second.p_luck_alone or first.hit_rate_low != second.hit_rate_low
+
+
+# ---------- second review, 2026-11-11 ----------
+
+def test_cash_far_out_of_proportion_to_an_open_stake_is_still_exact():
+    """One long call wins while 1,600 short ones lose: the short ones take cash to 0.5^1601 of the long
+    call's stake. Plain numbers overflowed here and returned infinity, which read as "proven"."""
+    tl = Timeline([(0, 10 ** 6)] + [(i + 1, i + 2) for i in range(1600)])
+    assert tl.log_cash([1.0] + [-1.0] * 1600, 0.5) == pytest.approx(0.0, abs=1e-9)      # 0.5 x 2 = 1, plus next to nothing
+    assert tl.log_cash([-1.0] * 1601, 0.5) == pytest.approx(1601 * math.log(0.5))
+    # 2,000 calls open at once that all win: each stake doubles, cash is 2 - 0.5^2000.
+    assert Timeline([(0, 1)] * 2000).log_cash([1.0] * 2000, 0.5) == pytest.approx(math.log(2.0))
+    for stake in scoring.STAKES:
+        assert math.isfinite(tl.log_cash([1.0] + [-1.0] * 1600, stake))
+
+
+def test_the_slow_exact_path_agrees_with_the_fast_one():
+    rng = random.Random(31)
+    windows = [(t, t + rng.randrange(1, 40)) for t in sorted(rng.randrange(0, 300) for _ in range(120))]
+    xs = [rng.choice([-1.0, 0.0, 0.3, 1.0, 4.0]) for _ in windows]
+    tl = Timeline(windows, pending=[50, 120])
+    for stake in scoring.STAKES:
+        back = [x + 1.0 for x in xs]
+        assert tl._log_cash_in_logs(back, stake) == pytest.approx(tl.log_cash(xs, stake), abs=1e-9)
+
+
+def test_a_void_gives_its_stake_back_and_never_leaves_the_account():
+    """At 50% stakes. A call wins: cash 1.5. Call X opens and takes 0.75. Another call takes half of the
+    0.75 left and wins: cash 1.125 while X is open. X is voided and its 0.75 comes back: 1.875. Taking X
+    out of the account instead would show 1.5 x 1.5 = 2.25, as if the second call had staked twice what
+    it did, decided after its result was known."""
+    windows, results = [(0, 1), (2, 3), (1, 4)], ["right", "right", "void"]
+    assert math.exp(Timeline([(0, 1), (2, 3)], pending=[1]).log_cash([1.0, 1.0], 0.5)) == pytest.approx(1.125)
+    assert math.exp(Timeline(windows).log_cash([1.0, 1.0, 0.0], 0.5)) == pytest.approx(1.875)
+    rec = scoring.record([0.25, 0.25, None], results, [], windows=windows)
+    cash = [math.exp(Timeline(windows).log_cash([1.0, 1.0, 0.0], s)) for s in scoring.STAKES]
+    assert rec.p_luck_alone == pytest.approx(len(cash) / sum(cash), rel=1e-4)
+    gone = scoring.record([0.25, 0.25], results[:2], [], windows=windows[:2])
+    assert gone.p_luck_alone < rec.p_luck_alone                           # removing X would have flattered the record
+    assert rec.n == 2 and rec.hit_rate == 1.0                              # a void is still never scored
+
+
+def test_the_projection_never_promises_a_verdict_sooner_than_its_entry_rules_allow():
+    # 12 right of 12: the odds are already under 1 in 20, but a verdict needs 30 scored calls and 10 tries.
+    rec = scoring.record([0.04] * 12, ["right"] * 12, [])
+    assert rec.verdict == "unproven" and rec.tries_to_next == 18

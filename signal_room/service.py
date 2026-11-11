@@ -602,9 +602,9 @@ def update_standing(db: Session, agent_ids: set[str], now: dt.datetime | None = 
 # ---------- records ----------
 
 def _resolved_query(db: Session, agent_id: str, horizon: str | None, since: dt.datetime | None):
-    # Every call that took a stake in the betting account and has closed: scored ones, flats, and priced
-    # calls that went unfilled (their stake only comes back, like a flat's).
-    q = db.query(Signal).filter(Signal.agent_id == agent_id, Signal.result.in_(("right", "wrong", "flat", "unfilled")))
+    # Every call that took a stake in the betting account and has closed: scored ones, and flats, voids
+    # and priced calls that went unfilled (their stake only comes back).
+    q = db.query(Signal).filter(Signal.agent_id == agent_id, Signal.result.in_(("right", "wrong", "flat", "unfilled", "void")))
     if horizon:
         q = q.filter(Signal.horizon == horizon)
     if since:
