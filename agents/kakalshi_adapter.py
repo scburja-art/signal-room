@@ -1,32 +1,31 @@
-"""Kakalshi adapter: turns Kakalshi's shadow bets into Signal Room signals.
+"""Kakalshi bridge: turns Kakalshi's paper bets into priced calls in the Signal Room.
 
-Watches shadow_results.json. Each new crypto bet becomes one signal:
-  ticker KXSOL15M-...  -> pair SOL, horizon 15m
-  side yes             -> long (price above the strike at close)
-  side no              -> short
-  price_paid (cents)   -> confidence: the market-implied probability that the chosen side wins.
-                          A yes at 33c means 33% implied for yes. A no at 33c means the no side
-                          was bought at 33c, i.e. 33% implied for no. Either way the price paid is
-                          the implied probability of the side taken, clamped to 0.50-0.95.
+Watches shadow_results.json. Each new bet on one of Kalshi's 15-minute crypto markets becomes one
+priced call (rule set 4):
+  ticker                -> the market, as is (KXSOL15M-26NOV111345-45)
+  side yes | no         -> the side
+  price_paid (cents)    -> the limit: the room fills the call only if, when it looks, the price is
+                           still at or under what Kakalshi paid. No chasing.
+  stated chance         -> the price paid plus 5 points, never above 0.99. Kakalshi's records carry
+                           no chance of their own, so this is the bridge's fixed claim: "worth five
+                           points more than it cost". It moves credits and ranking only; the verdict
+                           depends on wins, losses and cost alone.
 
-Kakalshi records carry confidence 0, so the market-implied probability of the side it took
-is the best available stand-in. Entries below 50c mean Kakalshi bet against the market's odds;
-those are posted at the floor of 0.50 (a 50/50 call) rather than dropped, so the record is complete.
+The room reads the price itself the moment the call lands, so these seconds matter: the file is
+checked once a second, and a bet first seen more than 30 seconds after Kakalshi made it is not
+posted at all (the price it got is gone, and a late fill would be a different bet).
 
-Timestamps in the shadow log are UTC (Kalshi's clock); the adapter compares in UTC.
+Timestamps in the shadow log are UTC (Kalshi's clock); the bridge compares in UTC. Only bets made
+after the bridge started are posted, so an old log does not flood the room. Posted bets are
+remembered by id + timestamp, because Kakalshi restarts bet numbering whenever it resets its log.
 
-Only bets whose timestamp is after the adapter started are posted, so an old log does not
-flood the room with stale signals. A bet older than its own horizon when first seen is skipped
-too: posting it would stamp a stale call as fresh. Posted bets are remembered by id + timestamp,
-because Kakalshi restarts bet numbering at 1 whenever it resets its shadow log.
+Transient errors (rate limit, server restart, the last window's call still closing) are retried on
+the next look, until the bet is too old. Permanent rejections are recorded and skipped.
 
-Transient errors (no fresh price yet, rate limit, server restart) are retried on the next poll.
-Permanent rejections (validation) are recorded and skipped.
-
-Each Kakalshi strategy gets its own Signal Room agent (own wallet, own record), so the room
-scores them separately. The strategy name comes from the bet's `strategy` field (falling back
-to `source`). Wallets are created on first sight and kept in the state directory as
-`kakalshi-<strategy>.json`.
+Each Kakalshi strategy gets its own Signal Room agent (own wallet, own record), named
+`kakalshi-<strategy>-priced`; the wallet is kept in the state directory under that name. The plain
+calls this bridge posted before rule set 4 belong to `kakalshi-<strategy>`, whose record stays as it
+is and receives nothing new.
 """
 from __future__ import annotations
 
@@ -37,16 +36,17 @@ import os
 import re
 import time
 
+from signal_room import kalshi
+
 from .client import SignalRoomClient, SignalRoomError
 
 log = logging.getLogger("agents.kakalshi")
 
-SERIES_PAIR = {"KXBTC": "BTC", "KXETH": "ETH", "KXSOL": "SOL", "KXXRP": "XRP"}
-SERIES_HORIZON = {"15M": "15m", "": "1h"}  # KXBTC15M -> 15m; plain KXBTC hourly -> 1h
-TICKER_RE = re.compile(r"^(KX(?:BTC|ETH|SOL|XRP))(15M)?-")
-CONF_MIN, CONF_MAX = 0.50, 0.95
-HORIZON_SECONDS = {"15m": 15 * 60, "1h": 60 * 60}
-TRANSIENT_STATUSES = {401, 429, 503}  # clock skew, rate limit, no fresh price: try again next poll
+STATED_EDGE = 0.05       # the chance it states: what it paid plus 5 points
+MAX_STATED = 0.99
+MAX_AGE_SECONDS = 30     # a bet first seen later than this is not posted
+POLL_SECONDS = 1.0
+TRANSIENT_STATUSES = {401, 409, 429, 503}  # clock skew, last call still closing, rate limit, restart: try again
 
 
 def load_posted(path: str) -> set:
@@ -65,21 +65,21 @@ def save_posted(path: str, posted: set) -> None:
     os.replace(tmp, path)
 
 
-def parse_bet(bet: dict) -> tuple[str, str, str, float] | None:
-    m = TICKER_RE.match(bet.get("ticker", ""))
-    if not m:
+def parse_bet(bet: dict) -> tuple[str, str, float, float] | None:
+    """(market, side, limit, stated chance) for a bet the room can take as a priced call, else None."""
+    market = bet.get("ticker", "")
+    if not kalshi.parse_ticker(market):
         return None
-    pair = SERIES_PAIR[m.group(1)]
-    horizon = SERIES_HORIZON[m.group(2) or ""]
     side = bet.get("side")
     if side not in ("yes", "no"):
         return None
-    direction = "long" if side == "yes" else "short"
-    price_c = bet.get("price_paid")
-    if price_c is None:
+    try:
+        limit = round(float(bet.get("price_paid")) / 100.0, 4)
+    except (TypeError, ValueError):
         return None
-    confidence = min(CONF_MAX, max(CONF_MIN, float(price_c) / 100.0))
-    return pair, horizon, direction, round(confidence, 4)
+    if not (0.0 < limit < 1.0):
+        return None
+    return market, side, limit, round(min(MAX_STATED, limit + STATED_EDGE), 4)
 
 
 def load_bets(path: str) -> list[dict]:
@@ -104,14 +104,57 @@ def strategy_of(bet: dict) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "unknown"
 
 
-def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 20) -> None:
+def handle(bet: dict, now: dt.datetime, started: dt.datetime, posted: set, client_for) -> bool:
+    """Deal with one bet from the log. Returns True if it should be looked at again (a transient failure)."""
+    bid = f"{bet.get('id')}@{bet.get('timestamp', '')}"
+    if bid in posted:
+        return False
+    try:
+        ts = dt.datetime.fromisoformat(bet["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt.timezone.utc)
+    except Exception:
+        posted.add(bid)
+        return False
+    if ts < started:
+        posted.add(bid)  # history, not a live call
+        return False
+    parsed = parse_bet(bet)
+    if parsed is None:
+        posted.add(bid)
+        return False
+    age = (now - ts).total_seconds()
+    if age > MAX_AGE_SECONDS:
+        log.info("bet %s: first seen %.0fs after it was made, too late to post", bid, age)
+        posted.add(bid)
+        return False
+    market, side, limit, stated = parsed
+    strategy = strategy_of(bet)
+    try:
+        out = client_for(strategy).post_priced(market, side, limit, stated)
+        log.info("bet %s [%s] -> %s %s limit=%.2f %s id=%s", bid, strategy, market, side, limit, out["fill"], out["signal_id"])
+        posted.add(bid)
+        return False
+    except SignalRoomError as e:
+        if e.status in TRANSIENT_STATUSES:
+            log.info("bet %s: %s, will retry", bid, e)
+            return True
+        log.warning("bet %s: rejected: %s", bid, e)
+        posted.add(bid)
+        return False
+    except Exception as e:  # network blip, server restart: retry on the next look
+        log.warning("bet %s: post failed (%s), will retry", bid, type(e).__name__)
+        return True
+
+
+def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: float = POLL_SECONDS) -> None:
     state_dir = os.path.dirname(state_path) or "."
     clients: dict[str, SignalRoomClient] = {}
 
     def client_for(strategy: str) -> SignalRoomClient:
         if strategy not in clients:
-            path = os.path.join(state_dir, f"kakalshi-{strategy}.json")
-            clients[strategy] = SignalRoomClient.load_or_register(base_url, path, name=f"kakalshi-{strategy}")
+            name = f"kakalshi-{strategy}-priced"
+            clients[strategy] = SignalRoomClient.load_or_register(base_url, os.path.join(state_dir, f"{name}.json"), name=name)
             log.info("strategy %s -> agent %s", strategy, clients[strategy].agent_id)
         return clients[strategy]
 
@@ -120,58 +163,33 @@ def main(base_url: str, shadow_path: str, state_path: str, poll_seconds: int = 2
     started = dt.datetime.now(dt.timezone.utc)
     log.info("kakalshi adapter watching %s (one agent per strategy)", shadow_path)
     waiting_logged = False
+    seen, retry = None, False
     while True:
         try:
-            bets = load_bets(shadow_path)
-        except Exception as e:  # anything unexpected: log once per occurrence, keep going
-            log.warning("could not read shadow log: %s", e)
-            time.sleep(poll_seconds)
-            continue
-        if not bets and not os.path.exists(shadow_path):
+            stamp = (os.path.getmtime(shadow_path), os.path.getsize(shadow_path))
+        except OSError:
             if not waiting_logged:
                 log.info("waiting for %s to appear (Kakalshi creates it on its first bet)", shadow_path)
                 waiting_logged = True
             time.sleep(poll_seconds)
             continue
         waiting_logged = False
+        if stamp == seen and not retry:      # nothing new since the last look
+            time.sleep(poll_seconds)
+            continue
+        try:
+            bets = load_bets(shadow_path)
+        except Exception as e:  # anything unexpected: log once per occurrence, keep going
+            log.warning("could not read shadow log: %s", e)
+            time.sleep(poll_seconds)
+            continue
+        before = len(posted)
+        now = dt.datetime.now(dt.timezone.utc)
+        retry = False
         for bet in bets:
-            bid = f"{bet.get('id')}@{bet.get('timestamp', '')}"
-            if bid in posted:
-                continue
-            try:
-                ts = dt.datetime.fromisoformat(bet["timestamp"])
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=dt.timezone.utc)
-            except Exception:
-                posted.add(bid)
-                continue
-            if ts < started:
-                posted.add(bid)  # history, not a live prediction
-                continue
-            parsed = parse_bet(bet)
-            if parsed is None:
-                posted.add(bid)
-                continue
-            pair, horizon, direction, confidence = parsed
-            age = (dt.datetime.now(dt.timezone.utc) - ts).total_seconds()
-            if age > HORIZON_SECONDS.get(horizon, 900):
-                log.info("bet %s: %.0fs old, past its %s horizon, skipping", bid, age, horizon)
-                posted.add(bid)
-                continue
-            strategy = strategy_of(bet)
-            try:
-                out = client_for(strategy).post_signal(pair, horizon, direction, confidence)
-                log.info("bet %s [%s] -> %s %s %s conf=%.2f id=%s", bid, strategy, pair, horizon, direction, confidence, out["signal_id"])
-                posted.add(bid)
-            except SignalRoomError as e:
-                if e.status == 409:
-                    log.info("bet %s [%s]: open signal for %s %s already pending, will retry", bid, strategy, pair, horizon)
-                elif e.status in TRANSIENT_STATUSES:
-                    log.info("bet %s: %s, will retry", bid, e)
-                else:
-                    log.warning("bet %s: rejected: %s", bid, e)
-                    posted.add(bid)
-            except Exception as e:  # network blip, server restart: retry next poll
-                log.warning("bet %s: post failed (%s), will retry", bid, type(e).__name__)
-        save_posted(posted_path, posted)
+            retry = handle(bet, now, started, posted, client_for) or retry
+        # A torn read (Kakalshi mid-write) comes back empty: look again rather than trusting it.
+        seen = stamp if bets else None
+        if len(posted) != before:
+            save_posted(posted_path, posted)
         time.sleep(poll_seconds)

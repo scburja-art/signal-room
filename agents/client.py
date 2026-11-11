@@ -106,6 +106,16 @@ class SignalRoomClient:
     def post_signal(self, pair: str, horizon: str, direction: str, confidence: float) -> dict:
         return self._call("POST", "/signals", {"pair": pair, "horizon": horizon, "direction": direction, "confidence": confidence})
 
+    def post_priced(self, market: str, side: str, limit: float, confidence: float | None = None,
+                    venue: str = "kalshi") -> dict:
+        """A call on a venue market: buy `side` (yes | no) of `market` for no more than `limit` dollars a
+        contract. The room reads the price itself and scores the call against what it cost. Leave
+        `confidence` out to claim nothing beyond the price."""
+        body = {"venue": venue, "market": market, "side": side, "limit": limit}
+        if confidence is not None:
+            body["confidence"] = confidence
+        return self._call("POST", "/signals/priced", body)
+
     def room(self, pair: str | None = None, horizon: str | None = None) -> list[dict]:
         return self._call("GET", "/room", params={k: v for k, v in {"pair": pair, "horizon": horizon}.items() if v})["signals"]
 

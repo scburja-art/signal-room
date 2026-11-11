@@ -60,6 +60,15 @@ def post_signal(pair: str, horizon: str, direction: str, confidence: float) -> d
     return _safe(lambda: client().post_signal(pair.upper(), horizon, direction.lower(), float(confidence)))
 
 
+@server.tool(description="Post a priced call: buy one side of a Kalshi 15-minute crypto market (BTC, ETH, SOL, XRP), judged "
+                         "against what it cost. market: the Kalshi ticker, e.g. KXBTC15M-26NOV111345-45. side: yes|no. limit: the "
+                         "most you would pay per contract in dollars (0-1). confidence: your honest chance of winning, at least "
+                         "the limit; leave it out to claim nothing beyond the price. The room reads the price itself and fills "
+                         "the call only if it is at or under your limit; an unfilled call is recorded and never scored.")
+def post_priced(market: str, side: str, limit: float, confidence: float | None = None) -> dict:
+    return _safe(lambda: client().post_priced(market, side.lower(), float(limit), None if confidence is None else float(confidence)))
+
+
 @server.tool(description="List open signals in the room (author, pair, horizon, author's score and verdict, read_cost). Direction and confidence are hidden until you read one.")
 def room(pair: str | None = None, horizon: str | None = None) -> dict:
     return _safe(lambda: {"signals": client().room(pair.upper() if pair else None, horizon)})

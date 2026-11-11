@@ -205,7 +205,7 @@ def test_kakalshi_adapter_helpers(tmp_path):
     assert load_bets(str(p)) == []
     p.write_text(json.dumps({"bets": [{"id": 1, "ticker": "KXXRP15M-26OCT28-1", "side": "yes", "price_paid": 72, "strategy": "crypto_first_minute"}]}))
     bets = load_bets(str(p))
-    assert parse_bet(bets[0]) == ("XRP", "15m", "long", 0.72) and strategy_of(bets[0]) == "crypto-first-minute"
+    assert parse_bet(bets[0]) == ("KXXRP15M-26OCT28-1", "yes", 0.72, 0.77) and strategy_of(bets[0]) == "crypto-first-minute"
     assert parse_bet({"ticker": "KXHIGHNY-x", "side": "yes", "price_paid": 50}) is None
     st = tmp_path / "posted.json"
     assert load_posted(str(st)) == set()

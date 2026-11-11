@@ -675,7 +675,7 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
     body = unseal_or_empty(sig)
     return {
         "signal_id": sig.id, "agent_id": sig.agent_id, "pair": sig.pair, "horizon": sig.horizon,
-        "direction": body.get("direction"), "confidence": body.get("confidence"),
+        "direction": _direction(body), "confidence": body.get("confidence"),
         "submitted_at": sig.submitted_at.isoformat(), "resolve_at": sig.resolve_at.isoformat(),
         "price_at_submit": sig.price_at_submit, "start_at": sig.start_at.isoformat() if sig.start_at else None,
         "hash": sig.hash, "hash_version": sig.hash_version,
@@ -685,6 +685,11 @@ def read_signal(db: Session, reader: Agent, signal_id: str) -> dict:
         "salt": body.get("salt") if sig.resolved_at is not None else None,
         **_priced_view(sig, body),
     }
+
+
+def _direction(body: dict) -> str | None:
+    """long | short. A priced call's side says it: these markets ask "will it finish higher?"."""
+    return body.get("direction") or {"yes": "long", "no": "short"}.get(body.get("side"))
 
 
 def _priced_view(sig: Signal, body: dict) -> dict:
@@ -702,7 +707,7 @@ def my_signals(db: Session, agent: Agent, limit: int = 200) -> list[dict]:
     for s in rows:
         body = unseal_or_empty(s)
         out.append({
-            "signal_id": s.id, "pair": s.pair, "horizon": s.horizon, "direction": body.get("direction"),
+            "signal_id": s.id, "pair": s.pair, "horizon": s.horizon, "direction": _direction(body),
             "confidence": body.get("confidence"), "submitted_at": s.submitted_at.isoformat(),
             "resolve_at": s.resolve_at.isoformat(), "price_at_submit": s.price_at_submit,
             "start_at": s.start_at.isoformat() if s.start_at else None, "hash": s.hash, "hash_version": s.hash_version,
