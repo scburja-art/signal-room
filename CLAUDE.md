@@ -37,5 +37,5 @@
 - When corrected, add a rule here so the mistake does not recur. Keep this file short.
 
 ## Commits
-- No `Co-Authored-By:` lines. No AI attribution of any kind.
+- Commits made by Claude are authored and signed as `Claude <noreply@anthropic.com>` so GitHub shows them Verified (the user's choice, 2026-11-11: the badge over his own name). No `Co-Authored-By:` lines or other attribution text in the message.
 - Match existing patterns. Simplify after implementing; remove dead code.
