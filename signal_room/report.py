@@ -37,6 +37,8 @@ def verdict_before(db, agent: Agent, start: dt.datetime) -> str | None:
         return agent.status
     if agent.id in service.control_ids(db):
         return "control"
+    if agent.id in service.closed_ids():
+        return "closed"
     # Against the board as it is now: the same bar the "now" verdict faces, so a change is a real change.
     return service._record(rows, 1, start, competitors=service.board_size(db, service._since("90d")))["verdict"]
 

@@ -36,6 +36,12 @@ CONTROL_STATE_FILES = ("momentum.json", "meanrev.json", "favourite.json", "reade
 AGENT_STATE_DIR = os.getenv("SIGNAL_ROOM_AGENT_STATE", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agents", "state"))
 CONTROL_IDS = tuple(x.strip() for x in os.getenv("SIGNAL_ROOM_CONTROL_IDS", "").split(",") if x.strip())
 CONTROL_REFRESH_SECONDS = 60
+# An identity that has been closed and carried on under another (approved 2026-11-11): the old record
+# stays visible and still counts toward the board, takes no rank, and names its successor in place of a
+# verdict. Known, like the yardsticks, only by identity files in the room's own state directory (old
+# file, new file), never by name. SIGNAL_ROOM_CLOSED_IDS ("old:new,old:new" agent ids) replaces them.
+CLOSED_STATE_FILES = (("kakalshi-crypto-first-minute.json", "kakalshi-crypto-first-minute-priced.json"),)
+CLOSED_IDS = tuple(tuple(p.strip() for p in x.split(":")) for x in os.getenv("SIGNAL_ROOM_CLOSED_IDS", "").split(",") if x.count(":") == 1)
 MIN_RESOLVED_FOR_RANK = 30
 SHRINK_N = 30
 BATCH_WINDOW_SECONDS = 60   # calls posted within a minute of each other count as one try in the luck odds

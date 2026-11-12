@@ -56,6 +56,7 @@ VERDICT_WORDS = {
     "delisted": "Delisted",
     "retired": "Retired",
     "control": "Control",
+    "closed": "Closed",
 }
 
 
@@ -105,8 +106,10 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
     else:
         odds = f"{nobody} does this well {luck(rec['p_luck'])}"
     field = (f"; bar raised {rec['competitors']}x for the {rec['competitors']} bots ranked on this board, delisted ones included"
-             if rec["competitors"] > 1 and rec["verdict"] != "control" else "")
+             if rec["competitors"] > 1 and rec["verdict"] not in ("control", "closed") else "")
     out.append(f"    {odds}, over {rec['tries']} separate tries (calls that share market time count once){field}")
+    if rec["verdict"] == "closed":
+        out.append(f"    closed: continued as {rec['continued_as']}. This record is kept as history; it takes no rank and still counts toward the board")
     if rec["verdict"] == "control":
         out.append("    a yardstick: its numbers are there to compare against; it gets no verdict and does not count toward the board")
     if not rec["ranked"]:

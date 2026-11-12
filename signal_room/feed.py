@@ -37,7 +37,7 @@ LOGGER_NAMES = {"agents.momentum": "Momentum", "agents.meanrev": "Mean-rev", "ag
                 "agents.kakalshi": "Kakalshi", "agents.favourite": "Favourite", "signal_room": "Room"}
 HORIZONS = {"15m": "15m", "1h": "1h", "4h": "4h", "24h": "24h"}
 VERDICTS = {"unproven": "Unproven", "luck": "Luck", "probably_not_luck": "Probably not luck", "proven": "Proven",
-            "worse_than_chance": "Worse than chance", "delisted": "Delisted", "retired": "Retired", "control": "Control"}
+            "worse_than_chance": "Worse than chance", "delisted": "Delisted", "retired": "Retired", "control": "Control", "closed": "Closed"}
 
 LINE = re.compile(r"^\d{4}-\d\d-\d\d (\d\d):(\d\d):\d\d,\d+ (\w+) ([\w.]+): (.*)$")
 # Lines the feed never shows: retries, the agents' own copies of what the server reports, routine requests.
@@ -321,21 +321,24 @@ def scoreboard(color: bool = True) -> list[str]:
                 done = [x[0] for x in reads if x[0] in ("right", "wrong")]
                 readers.append((a, len(reads), done.count("right"), len(done), service.balance(db, a.id)))
 
-        vw = max([len("Verdict")] + [len(VERDICTS.get(r["verdict"], r["verdict"])) for _, r in bots])
+        vw = max([len("Verdict")] + [len(VERDICTS.get(r["verdict"], r["verdict"])) for _, r in bots if r["verdict"] != "closed"])
         title = f" Scoreboard · {dt.datetime.now().strftime('%I:%M %p').lstrip('0')} "
         out = ["", p(BOLD, f"──{title}" + "─" * max(4, 70 - len(title)))]
         out.append(p(GRAY, f"  {'Bot':<13} {'Verdict':<{vw}}  {'Right':>5}   {'vs. its bar':<13}  {'Calls':>5}   Next step"))
         for a, r in bots:
             name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
             verdict = VERDICTS.get(r["verdict"], r["verdict"])
+            if r["verdict"] == "closed":
+                out.append(f"  {name} {p(GRAY, 'Closed: continued as ' + display(r['continued_as']))}{p(GRAY, ' · ' + str(r['n']) + ' calls kept as history')}")
+                continue
             vcode = {"proven": GREEN, "probably_not_luck": GREEN, "worse_than_chance": RED,
-                     "delisted": RED, "retired": RED, "control": GRAY}.get(r["verdict"], WHITE)
+                     "delisted": RED, "retired": RED, "control": GRAY, "closed": GRAY}.get(r["verdict"], WHITE)
             if r["n"] == 0:
                 skill, scode, right, nxt = "—", GRAY, "—", "—"
             else:
                 skill, scode = versus_coin_flip(r["skill_points"])
                 right = f"{r['hit_rate'] * 100:.0f}%"
-                nxt = days_text(r.get("days_to_next")) if r["verdict"] not in ("unproven", "control") else "—"
+                nxt = days_text(r.get("days_to_next")) if r["verdict"] not in ("unproven", "control", "closed") else "—"
             out.append(f"  {name} {p(vcode, f'{verdict:<{vw}}')}  {right:>5}   {p(scode, f'{skill:<13}')}  {r['n']:>5}   "
                        + (p(GRAY, nxt) if nxt == "—" else nxt))
         if readers:

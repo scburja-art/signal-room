@@ -123,9 +123,11 @@ def yardsticks(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "AGENT_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(config, "CONTROL_REFRESH_SECONDS", 0)
     monkeypatch.setattr(service, "_controls", None)
+    monkeypatch.setattr(service, "_closed", None)
 
     def make(filename, agent):
         import json
         (tmp_path / filename).write_text(json.dumps({"chain": "evm", "private_key": "not-read", "api_key": "not-read", "agent_id": agent.id}))
     yield make
     service._controls = None
+    service._closed = None

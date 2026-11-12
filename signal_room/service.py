@@ -640,6 +640,45 @@ def control_ids(db: Session | None = None) -> frozenset[str]:
     return _controls[1]
 
 
+def _id_in(name: str) -> str | None:
+    """The agent id in one of the room's own identity files. Only the id is taken; a file that is missing
+    or cannot be read names nobody."""
+    try:
+        with open(os.path.join(config.AGENT_STATE_DIR, name)) as f:
+            agent_id = json.load(f).get("agent_id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return agent_id if isinstance(agent_id, str) and agent_id else None
+
+
+_closed: tuple[float, dict] | None = None
+
+
+def closed_ids() -> dict[str, str]:
+    """Identities that were closed and carried on under another: old agent id -> the id it continues as.
+    Read at most once a minute. A pair counts only when both ids are known and differ; anything less
+    leaves the old identity an ordinary agent, the cautious side."""
+    global _closed
+    now = time.monotonic()
+    if _closed is not None and now - _closed[0] < config.CONTROL_REFRESH_SECONDS:
+        return _closed[1]
+    pairs = list(config.CLOSED_IDS) or [(_id_in(old), _id_in(new)) for old, new in config.CLOSED_STATE_FILES]
+    out = {old: new for old, new in pairs if old and new and old != new}
+    _closed = (now, out)
+    return out
+
+
+def _as_closed(db: Session, rec: dict, successor_id: str) -> dict:
+    """A closed identity keeps every number, but it is no longer in the running: no verdict, no next
+    step, and the name of the identity that carries on. Unknown successor: left as it was."""
+    successor = db.get(Agent, successor_id)
+    if successor is None:
+        return rec
+    rec.update(verdict="closed", next_verdict=None, tries_to_next=None, days_to_next=None,
+               continued_as=successor.name, continued_as_id=successor.id)
+    return rec
+
+
 def _as_control(rec: dict) -> dict:
     """A yardstick's record keeps every number (its luck odds are the warning light), but it is not in the
     running for a verdict: it is labelled a control, with no next step."""
@@ -723,7 +762,9 @@ def agent_record(db: Session, agent_id: str, horizon: str | None = None, window:
     rec = {"horizon": horizon or "all", "window": window,
            **_record(rows, _slices(db, agent_id, since, horizon, None), competitors=board_size(db, since),
                      pending=_pending_query(db, agent_id, horizon).all())}
-    return _as_control(rec) if agent_id in control_ids(db) else rec
+    if agent_id in control_ids(db):
+        return _as_control(rec)
+    return _as_closed(db, rec, closed_ids()[agent_id]) if agent_id in closed_ids() else rec
 
 
 def public_agent(db: Session, agent: Agent, horizon: str | None, window: str) -> dict:
@@ -746,11 +787,15 @@ def leaderboard(db: Session, horizon: str | None, pair: str | None, window: str,
         rec = _record(q.all(), _slices(db, a.id, since, horizon, pair), competitors=field,
                       pending=(open_q.filter(Signal.pair == pair) if pair else open_q).all())
         if rec["ranked"]:
-            out.append({"agent_id": a.id, "name": a.name, **(_as_control(rec) if a.id in controls else rec)})
+            if a.id in controls:
+                rec = _as_control(rec)
+            elif a.id in closed_ids():
+                rec = _as_closed(db, rec, closed_ids()[a.id])
+            out.append({"agent_id": a.id, "name": a.name, **rec})
     out.sort(key=lambda r: r["score"], reverse=True)
     place = 0
-    for r in out:     # a yardstick is listed where its score puts it, for comparison, but takes no place in the ranking
-        if r["verdict"] == "control":
+    for r in out:     # a yardstick or a closed identity is listed where its score puts it, but takes no place in the ranking
+        if r["verdict"] in ("control", "closed"):
             r["rank"] = None
         else:
             place += 1
