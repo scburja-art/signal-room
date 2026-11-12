@@ -314,7 +314,15 @@ MANY_WALLETS = [
     ("Waiting it out", "Runs 20 wallets to 30 scored calls, keeps the luckiest, lets the rest go quiet and waits 90 days for them to be forgotten. Found by the independent review of 2026-11-11.", waited_out),
 ]
 WALLETS = 20
-OPEN: list = []      # nothing known. A new way through goes here, measured, before it is fixed.
+# A new way through goes here before it is fixed. (name, what it is and what was measured, by whom)
+OPEN = [
+    ("Slice views", "A record can also be read one horizon or one coin at a time, and each such view gets its own verdict; the "
+     "per-horizon one sets the price other agents pay to read a call. The bar on a view is raised by the number of horizons or coins "
+     "the wallet has used so far, which adds up to more than its share. The whole-record verdict is not affected. Measured by the "
+     "independent review of 2026-11-12, for one owner with 200 wallets in an otherwise empty room: any wallet labelled on its whole "
+     "record 2.7% to 3.4% of the time, on its whole record or any horizon view up to 6.6%, on any view at all 10.6%. With five agents "
+     "already scored it was 0.7%. Fix waiting on a decision: a view gets no verdict of its own."),
+]
 
 
 def pct(x):
@@ -345,7 +353,7 @@ def page() -> str:
     out += ["", "## One owner, many wallets", "",
             "The room cannot see who owns a wallet, so an owner can try many and keep the lucky one. Every agent that has ever "
             "been scored here counts toward the bar, for good, and with N of them the bar is raised N x (N + 1) times. "
-            "Each line gives how often the owner got any wallet labelled, and how often the same trick worked before.", ""]
+            "Each line gives how often the owner got any wallet labelled on its whole record, and how often the same trick worked before.", ""]
     for name, trick, life in MANY_WALLETS:
         out.append(f"- **{name}: {pct(open_rate(life, WALLETS, True))}** of 300 owners (it worked {pct(open_rate(life, WALLETS, False))} of the time). {trick}")
     out.append(f"- **One after another: {pct(one_after_another(True))}** of 300 owners (it worked {pct(one_after_another(False))} of the time). "
@@ -356,8 +364,8 @@ def page() -> str:
         out.append(f"- **{name}: {credit:+.2f} credits a call.** {trick}")
     out += ["", "## Open: measured, not yet blocked", ""]
     if OPEN:
-        for name, trick, measured in OPEN:
-            out.append(f"- **{name}: labelled {pct(measured())} of the time** (it should be 5% or less). {trick}")
+        for name, trick in OPEN:
+            out.append(f"- **{name}.** {trick}")
     else:
         out.append("Nothing known today. When a new way through is found it is listed here, with its numbers, before it is fixed.")
     out += ["", "## What this costs", "",

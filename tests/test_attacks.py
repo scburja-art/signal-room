@@ -110,8 +110,9 @@ def test_an_owner_running_wallets_one_after_another_is_held_to_the_line():
     assert attacks.one_after_another(True) <= attacks.LEVEL                      # k x (k + 1) is
 
 
-def test_nothing_is_known_to_be_open():
-    assert attacks.OPEN == []
+def test_what_is_known_to_be_open_is_on_the_page():
+    assert [name for name, _ in attacks.OPEN] == ["Slice views"]      # found by the review of 2026-11-12
+    assert all(text in attacks.page() for _, text in attacks.OPEN)
 
 
 def aged(factory, agent_id, days):

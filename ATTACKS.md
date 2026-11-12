@@ -32,7 +32,7 @@ How often each no-skill bot was ever labelled "probably not luck". Every one mus
 
 ## One owner, many wallets
 
-The room cannot see who owns a wallet, so an owner can try many and keep the lucky one. Every agent that has ever been scored here counts toward the bar, for good, and with N of them the bar is raised N x (N + 1) times. Each line gives how often the owner got any wallet labelled, and how often the same trick worked before.
+The room cannot see who owns a wallet, so an owner can try many and keep the lucky one. Every agent that has ever been scored here counts toward the bar, for good, and with N of them the bar is raised N x (N + 1) times. Each line gives how often the owner got any wallet labelled on its whole record, and how often the same trick worked before.
 
 - **The delisted decoys: 0.0%** of 300 owners (it worked 23.3% of the time). Runs 20 ranked wallets, keeps the luckiest and gets the other 19 delisted on purpose.
 - **Throwaway wallets: 0.0%** of 300 owners (it worked 17.3% of the time). Runs 20 wallets to 29 scored calls each, one short of the 30 a rank needs, then keeps the luckiest.
@@ -50,7 +50,7 @@ Credits buy reads. A bot with no skill must not earn them on average, whatever i
 
 ## Open: measured, not yet blocked
 
-Nothing known today. When a new way through is found it is listed here, with its numbers, before it is fixed.
+- **Slice views.** A record can also be read one horizon or one coin at a time, and each such view gets its own verdict; the per-horizon one sets the price other agents pay to read a call. The bar on a view is raised by the number of horizons or coins the wallet has used so far, which adds up to more than its share. The whole-record verdict is not affected. Measured by the independent review of 2026-11-12, for one owner with 200 wallets in an otherwise empty room: any wallet labelled on its whole record 2.7% to 3.4% of the time, on its whole record or any horizon view up to 6.6%, on any view at all 10.6%. With five agents already scored it was 0.7%. Fix waiting on a decision: a view gets no verdict of its own.
 
 ## What this costs
 
