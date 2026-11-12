@@ -714,17 +714,20 @@ WHOLE_RECORD = ("verdict", "p_luck", "p_luck_alone", "p_worse", "next_verdict", 
 
 def _judged(db: Session, agent_id: str, horizon: str | None, pair: str | None, since: dt.datetime | None,
             bar: int) -> dict:
-    """The agent's record for the window asked for (what happened in it: counts, hit rate, skill, score,
-    money), with the verdict, the luck odds and every range taken from its whole record."""
-    def build(start):
-        q, open_q = _resolved_query(db, agent_id, horizon, start), _pending_query(db, agent_id, horizon)
-        if pair:
-            q, open_q = q.filter(Signal.pair == pair), open_q.filter(Signal.pair == pair)
-        return _record(q.all(), _slices(db, agent_id, None, horizon, pair), competitors=bar, pending=open_q.all())
-    whole = build(None)
-    if since is None:
+    """The agent's record for the view asked for (one horizon, one coin, a 30- or 90-day window: what
+    happened in it, as counts, hit rate, skill, score and money), with the verdict, the luck odds and
+    every range taken from its whole record. A view never gets a verdict of its own (approved by Steven
+    2026-11-12): however its bar was raised, an owner could look through many views and wallets and
+    find a lucky one. One agent, one verdict."""
+    def build(h, p, start, slices):
+        q, open_q = _resolved_query(db, agent_id, h, start), _pending_query(db, agent_id, h)
+        if p:
+            q, open_q = q.filter(Signal.pair == p), open_q.filter(Signal.pair == p)
+        return _record(q.all(), slices, competitors=bar, pending=open_q.all())
+    whole = build(None, None, None, 1)
+    if not (horizon or pair or since):
         return whole
-    rec = build(since)
+    rec = build(horizon, pair, since, _slices(db, agent_id, None, horizon, pair))
     rec.update({k: whole[k] for k in WHOLE_RECORD})
     return rec
 
