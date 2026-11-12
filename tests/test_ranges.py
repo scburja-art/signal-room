@@ -119,7 +119,7 @@ def test_competitors_raise_the_bar_by_hand():
     assert flip.p_luck == 1.0
 
 
-def test_board_size_counts_every_agent_ranked_in_the_window(client, session_factory):
+def test_board_size_counts_every_agent_ever_scored(client, session_factory):
     from signal_room import service
     from signal_room.db import Agent as AgentRow
     from tests.api_helpers import Agent
@@ -128,14 +128,15 @@ def test_board_size_counts_every_agent_ranked_in_the_window(client, session_fact
     a, b, c = Agent(client, "a"), Agent(client, "b"), Agent(client, "c")
     post_and_resolve(client, session_factory, a, 30, right=True)
     post_and_resolve(client, session_factory, b, 30, right=True)
-    post_and_resolve(client, session_factory, c, 5, right=True)       # under 30: not on the board
+    post_and_resolve(client, session_factory, c, 5, right=True)       # under 30, unranked, and it counts all the same
     spread(session_factory)
     db = session_factory()
-    assert service.board_size(db, service._since("90d")) == 2
+    assert service.board_size(db) == 3
     rec = a.get(f"/agents/{a.id}").json()
-    assert rec["competitors"] == 2 and rec["p_luck"] == pytest.approx(min(1.0, 2 * rec["p_luck_alone"]), rel=1e-5)
+    # By hand: three agents have been scored here, so the bar is 3 x 4 = 12.
+    assert rec["competitors"] == 12 and rec["p_luck"] == pytest.approx(min(1.0, 12 * rec["p_luck_alone"]), rel=1e-5)
     # A delisted agent still counts (since 2026-11-11; until then it left the field, which let an owner
     # run many wallets, keep the luckiest and have the rest thrown out).
     db.query(AgentRow).filter_by(id=b.id).first().status = "delisted"
     db.commit()
-    assert service.board_size(db, service._since("90d")) == 2
+    assert service.board_size(db) == 3

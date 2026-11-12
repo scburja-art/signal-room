@@ -619,7 +619,9 @@ def test_a_priced_record_reads_against_its_bar(client, session_factory):
     assert rec["edge"] == pytest.approx(0.1333, abs=1e-4) and rec["edge_low"] < rec["edge"] < rec["edge_high"]
     assert rec["profit_per_contract"] == pytest.approx(0.1333, abs=1e-4)
     assert rec["cum_return"] == 0.0 and rec["always_long_return"] == 0.0    # bought, not traded 1:1
-    assert rec["p_luck"] < 0.05 and rec["verdict"] == "probably_not_luck"
+    # Alone it would clear the line; the bar for a field of one is 1 x 2, and at twice the odds it does not yet.
+    assert rec["p_luck_alone"] < 0.05 and rec["competitors"] == 2
+    assert rec["p_luck"] == pytest.approx(2 * rec["p_luck_alone"], abs=2e-6) and rec["verdict"] == "luck"
     assert service.leaderboard(s, None, None, "all")[0]["agent_id"] == a.id
     s.close()
 

@@ -24,7 +24,10 @@ def test_status_matches_api(client, session_factory):
     text = status.report(session_factory())
     api = good.get("/leaderboard").json()["agents"]
     assert api[0]["name"] == "good-bot" and len(api) == 1
-    assert "1. good-bot  Proven · right 89%" in text          # 32/36, each its own try
+    # 32/36, each its own try. By hand: alone its odds are 7 / sum of (1+s)^32 (1-s)^4 over the seven stakes
+    # = 0.000204, "proven". Two agents have been scored here, so the bar is 2 x 3 = 6: 0.00122, one step short.
+    assert api[0]["p_luck_alone"] == pytest.approx(0.000204, abs=1e-6) and api[0]["p_luck"] == pytest.approx(0.001223, abs=1e-6)
+    assert "1. good-bot  Probably not luck · right 89%" in text
     assert f"skill {api[0]['skill_points']:+d}" in text
     assert "scored 36, flat 0, open 0, voided 0" in text
     assert "new-bot  (active)\n    Unproven · right 100%" in text

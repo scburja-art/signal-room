@@ -686,19 +686,47 @@ def _as_control(rec: dict) -> dict:
     return rec
 
 
-def board_size(db: Session, since: dt.datetime | None) -> int:
-    """How many agents have enough scored calls in the window to have been ranked: the field a reader
-    picks the best of. An agent that has since been delisted or retired still counts (approved by Steven
-    2026-11-11): an owner who ran twenty, kept the luckiest and had the rest thrown out has still picked
-    the best of twenty. The room's own yardstick bots are not in that field. At least 1 (the agent itself)."""
-    q = db.query(Signal.agent_id).filter(Signal.result.in_(("right", "wrong")))
+def board_size(db: Session, since: dt.datetime | None = None) -> int:
+    """N: every agent that has ever had a scored call here, whatever became of it (quiet, delisted,
+    retired, closed) and however long ago. It never shrinks. The room's own yardstick bots are not in
+    it. `since` is ignored: a count that forgets is a count an owner can wait out. At least 1."""
+    q = db.query(func.count(func.distinct(Signal.agent_id))).filter(Signal.result.in_(("right", "wrong")))
     controls = control_ids(db)
     if controls:
         q = q.filter(Signal.agent_id.notin_(controls))
-    if since:
-        q = q.filter(Signal.resolved_at >= since)
-    counts = q.group_by(Signal.agent_id).having(func.count(Signal.id) >= config.MIN_RESOLVED_FOR_RANK).all()
-    return max(1, len(counts))
+    return max(1, q.scalar() or 0)
+
+
+def field_bar(db: Session) -> int:
+    """How many times the luck odds are raised before a verdict: N x (N + 1) (approved by Steven 2026-11-12).
+    One owner the room cannot see may try any number of wallets, side by side or one after another,
+    and keep the lucky one. The k-th wallet to arrive can only be labelled once N is at least k, so its
+    chance is at most 5% / (k(k+1)); over every wallet that ever comes those add up to at most 5%."""
+    n = board_size(db)
+    return n * (n + 1)
+
+
+# What a verdict rests on. Always the agent's whole record, never a 30- or 90-day one: an account
+# that restarts at a window's edge is not honest over a long life, and the sum above needs it to be.
+WHOLE_RECORD = ("verdict", "p_luck", "p_luck_alone", "p_worse", "next_verdict", "tries_to_next", "days_to_next",
+                "competitors", "hit_rate_low", "hit_rate_high", "bss_low", "bss_high", "edge_low", "edge_high", "calibration")
+
+
+def _judged(db: Session, agent_id: str, horizon: str | None, pair: str | None, since: dt.datetime | None,
+            bar: int) -> dict:
+    """The agent's record for the window asked for (what happened in it: counts, hit rate, skill, score,
+    money), with the verdict, the luck odds and every range taken from its whole record."""
+    def build(start):
+        q, open_q = _resolved_query(db, agent_id, horizon, start), _pending_query(db, agent_id, horizon)
+        if pair:
+            q, open_q = q.filter(Signal.pair == pair), open_q.filter(Signal.pair == pair)
+        return _record(q.all(), _slices(db, agent_id, None, horizon, pair), competitors=bar, pending=open_q.all())
+    whole = build(None)
+    if since is None:
+        return whole
+    rec = build(since)
+    rec.update({k: whole[k] for k in WHOLE_RECORD})
+    return rec
 
 
 def _window(s: Signal) -> tuple[dt.datetime, dt.datetime]:
@@ -757,11 +785,8 @@ def _slices(db: Session, agent_id: str, since: dt.datetime | None, horizon: str 
 
 
 def agent_record(db: Session, agent_id: str, horizon: str | None = None, window: str = "90d") -> dict:
-    since = _since(window)
-    rows = _resolved_query(db, agent_id, horizon, since).all()
     rec = {"horizon": horizon or "all", "window": window,
-           **_record(rows, _slices(db, agent_id, since, horizon, None), competitors=board_size(db, since),
-                     pending=_pending_query(db, agent_id, horizon).all())}
+           **_judged(db, agent_id, horizon, None, _since(window), field_bar(db))}
     if agent_id in control_ids(db):
         return _as_control(rec)
     return _as_closed(db, rec, closed_ids()[agent_id]) if agent_id in closed_ids() else rec
@@ -777,15 +802,10 @@ def public_agent(db: Session, agent: Agent, horizon: str | None, window: str) ->
 def leaderboard(db: Session, horizon: str | None, pair: str | None, window: str, limit: int = 100) -> list[dict]:
     agents = db.query(Agent).filter(Agent.status == "active").all()
     since = _since(window)
-    field, controls = board_size(db, since), control_ids(db)
+    field, controls = field_bar(db), control_ids(db)
     out = []
     for a in agents:
-        q = _resolved_query(db, a.id, horizon, since)
-        if pair:
-            q = q.filter(Signal.pair == pair)
-        open_q = _pending_query(db, a.id, horizon)
-        rec = _record(q.all(), _slices(db, a.id, since, horizon, pair), competitors=field,
-                      pending=(open_q.filter(Signal.pair == pair) if pair else open_q).all())
+        rec = _judged(db, a.id, horizon, pair, since, field)
         if rec["ranked"]:
             if a.id in controls:
                 rec = _as_control(rec)

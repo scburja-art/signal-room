@@ -32,13 +32,13 @@ def board(client, factory, yardsticks, names, right=True):
 
 
 def test_yardsticks_do_not_count_toward_the_size_of_the_board(client, session_factory, yardsticks):
-    # Two real bots and two yardsticks, each with 30 scored calls. The field a reader chooses among is two.
+    # Two real bots and two yardsticks, each with 30 scored calls. The field is two, so the bar is 2 x 3.
     bots = board(client, session_factory, yardsticks, ["alpha", "beta", "momentum-control", "favourite-control"])
     db = session_factory()
     assert service.board_size(db, service._since("90d")) == 2
     rec = bots["alpha"].get(f"/agents/{bots['alpha'].id}").json()
-    # By hand: the bar is raised 2x, not 4x.
-    assert rec["competitors"] == 2 and rec["p_luck"] == pytest.approx(min(1.0, 2 * rec["p_luck_alone"]), rel=1e-5)
+    # By hand: the bar is raised 2 x 3 = 6 times, not 4 x 5 = 20.
+    assert rec["competitors"] == 6 and rec["p_luck"] == pytest.approx(min(1.0, 6 * rec["p_luck_alone"]), rel=1e-5)
     db.close()
 
 

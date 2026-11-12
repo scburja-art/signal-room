@@ -441,7 +441,7 @@ class Record:
     skill_points: int = 0          # skill on a readable scale: BSS x 100, 0 = coin flip
     next_verdict: str | None = None
     tries_to_next: int | None = None   # projection, if the next stretch looks like the record so far
-    competitors: int = 1               # agents ranked on the board this record competes on, delisted ones included
+    competitors: int = 1               # how many times the bar is raised for the field: N x (N + 1) over every agent ever scored
     p_luck_alone: float = 1.0          # the luck odds before the competitors correction
     exploratory: bool = False      # a slice (one coin or one time window): the bar is raised per slice
     always_long_return: float = 0.0   # the same windows, same cost, always calling long: the no-skill baseline

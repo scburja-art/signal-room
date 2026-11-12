@@ -26,10 +26,10 @@ def bar(rate: float) -> str:
 
 
 def verdict_before(db, agent: Agent, start: dt.datetime) -> str | None:
-    """The 90-day verdict as it stood when the report window opened."""
+    """The verdict as it stood when the report window opened, on the whole record up to then."""
     rows = (db.query(Signal)
             .filter(Signal.agent_id == agent.id, Signal.result.in_(("right", "wrong", "flat")),
-                    Signal.resolved_at < start, Signal.resolved_at >= start - dt.timedelta(days=90))
+                    Signal.resolved_at < start)
             .order_by(Signal.resolved_at).all())
     if not rows:
         return None
@@ -40,7 +40,7 @@ def verdict_before(db, agent: Agent, start: dt.datetime) -> str | None:
     if agent.id in service.closed_ids():
         return "closed"
     # Against the board as it is now: the same bar the "now" verdict faces, so a change is a real change.
-    return service._record(rows, 1, start, competitors=service.board_size(db, service._since("90d")))["verdict"]
+    return service._record(rows, 1, start, competitors=service.field_bar(db))["verdict"]
 
 
 def bot_lines(db, agent: Agent, start: dt.datetime, end: dt.datetime) -> list[str] | None:

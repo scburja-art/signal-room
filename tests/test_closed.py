@@ -53,8 +53,8 @@ def test_a_closed_identity_still_counts_toward_the_board(client, session_factory
     db = session_factory()
     assert service.board_size(db, service._since("90d")) == 3
     rec = bots["alpha"].get(f"/agents/{bots['alpha'].id}").json()
-    # By hand: three wallets have been ranked, so alpha's bar is still raised 3x.
-    assert rec["competitors"] == 3 and rec["p_luck"] == pytest.approx(min(1.0, 3 * rec["p_luck_alone"]), rel=1e-5)
+    # By hand: three wallets have been scored here, the closed one among them, so the bar is 3 x 4 = 12.
+    assert rec["competitors"] == 12 and rec["p_luck"] == pytest.approx(min(1.0, 12 * rec["p_luck_alone"]), rel=1e-5)
     db.close()
 
 
