@@ -2,6 +2,8 @@ import os
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["SIGNAL_ROOM_AGENT_STATE"] = __import__("tempfile").mkdtemp(prefix="signal-room-no-controls-")   # no yardsticks unless a test makes some
+os.environ["TZ"] = "America/New_York"   # the feed prints local time; tests read the same on any machine
+__import__("time").tzset()
 os.environ["SIGNAL_ROOM_MASTER_KEY"] = "zJ9S5n8rQw1pYv0K3mC7xT2bL6aH4dF8gE1uN5sR9oI="
 
 import datetime as dt  # noqa: E402
