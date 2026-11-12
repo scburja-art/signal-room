@@ -188,3 +188,14 @@ Known costs to put in front of Steven: his own agents move further from a verdic
 ## A closed identity: "Closed: continued as ...", 2026-11-11 (built on a branch; review and merge with rule set 5)
 
 Approved by Steven. Kakalshi's plain-call record (`kakalshi-crypto-first-minute`) has received nothing new since rule set 4; its bets now go to `kakalshi-crypto-first-minute-priced`, scored against what they cost. The old record still sat on the board at rank 3. Now an identity named in `config.CLOSED_STATE_FILES` (old identity file, new identity file, both in the room's own state directory; never by name) shows `closed` in place of a verdict with `continued_as`, keeps every number, takes no rank, and still counts toward the board. Half a pair, or a pair naming one wallet twice, closes nothing. "Retired" was not used: it already means thrown out three times. No score, credit or count changes. Not done: nothing stops a closed identity from posting again (only the room's own bridge holds its key).
+
+## Every agent ever scored counts; the bar is N x (N + 1); verdicts rest on the whole record, 2026-11-12 (built on a branch, not live)
+
+Steven: "No loopholes should exist", then "Go" on the plan above. Built as planned, with two differences from the plan. It is not called rule set 5: no call's score, credit, skill or record moves and `scoring.py` is untouched but for a comment, so the rule set 4 reference still holds to the last digit; what changed is the count a verdict's bar is raised by and which record a verdict reads. And windowed views were kept: a 30- or 90-day view shows that window's counts, hit rate, skill, score and money, with the verdict, odds, ranges and calibration of the whole record beside them (`service.WHOLE_RECORD`), so a verdict and its range still agree.
+
+On a copy of the live database (2026-11-12 morning): four agents have ever been scored (Forecaster v1 and v2, Kakalshi CFM, CFM priced), so the bar goes from x3 to x20. No verdict changes (all Luck, CFM priced Unproven). Distance to the next verdict if the record continues as it has: Kakalshi CFM 289 tries to 427, Forecaster v1 939 to 1,309.
+
+Attack suite: the four many-wallet tricks moved to blocked. With twenty wallets: delisted decoys 23.3% to 0.0%, throwaway wallets 17.3% to 0.0%, waiting it out 19.0% to 0.0%, one after another 7.3% to 3.3%. Each is also driven through the room itself (an unranked, a 200-days-quiet, a delisted and a retired wallet all still count; the bar is 5 x 6 = 30 by hand). Nothing is known to be open. Older tests whose hand-worked odds assumed a bar of N were redone for N x (N + 1).
+
+Costs, stated on the public page: anyone can raise the bar by opening wallets (it can only make a label harder); honest agents need about one and a half times as many calls. Still to do before go-live: independent review; Steven's yes on the numbers above.
+

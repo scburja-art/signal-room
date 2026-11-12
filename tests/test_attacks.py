@@ -91,71 +91,90 @@ def test_the_loud_coin_flipper_is_delisted():
     assert scoring.should_delist(briers)
 
 
-# ---------- open: measured, not yet blocked ----------
-# This passes because the gap is there. When a fix lands, its first assertion fails: move the attack to
-# the blocked list and turn the test round, as was done for the delisted decoys on 2026-11-11.
+# ---------- one owner, many wallets ----------
 
-@pytest.mark.parametrize("name,trick,life,wallets", attacks.OPEN, ids=lambda v: v if isinstance(v, str) and len(v) < 30 else "")
-def test_open_gap_many_wallets_keep_the_lucky_one(name, trick, life, wallets):
-    assert attacks.open_rate(life, wallets, counted=False) > attacks.LEVEL, f"{name} no longer works: move it to BLOCKED"
-    assert attacks.open_rate(life, wallets, counted=True) <= attacks.LEVEL     # what counting every wallet would do
+def test_the_bar_by_hand():
+    assert [attacks.bar(n) for n in (1, 2, 3, 5, 20, 100)] == [2, 6, 12, 30, 420, 10100]
+    # The shares add up to the whole 5% and no more: 1/(1x2) + 1/(2x3) + ... + 1/(n(n+1)) = n/(n+1) < 1.
+    assert sum(1 / attacks.bar(k) for k in range(1, 10001)) == pytest.approx(10000 / 10001)
 
 
-def test_open_gap_wallets_run_one_after_another():
-    assert attacks.one_after_another() > attacks.LEVEL, "one after another no longer works: move it to the blocked list"
+@pytest.mark.parametrize("name,trick,life", attacks.MANY_WALLETS, ids=[m[0] for m in attacks.MANY_WALLETS])
+def test_an_owner_with_twenty_wallets_side_by_side_is_held_to_the_line(name, trick, life):
+    assert attacks.open_rate(life, attacks.WALLETS, counted=False) > 0.15       # what the trick did before
+    assert attacks.open_rate(life, attacks.WALLETS, counted=True) <= attacks.LEVEL
 
 
-def test_open_gap_a_wallet_under_thirty_calls_is_not_counted(client, session_factory):
-    ranked, short = Agent(client, "ranked"), Agent(client, "one-short")
-    post_and_resolve(client, session_factory, ranked, 30, right=True)
-    post_and_resolve(client, session_factory, short, 29, right=True)
-    spread(session_factory)
-    db = session_factory()
-    assert service.board_size(db, service._since("90d")) == 1
+def test_an_owner_running_wallets_one_after_another_is_held_to_the_line():
+    assert attacks.one_after_another(False) > attacks.LEVEL                      # a bar of k was not enough
+    assert attacks.one_after_another(True) <= attacks.LEVEL                      # k x (k + 1) is
+
+
+def test_nothing_is_known_to_be_open():
+    assert attacks.OPEN == []
+
+
+def aged(factory, agent_id, days):
+    """Move an agent's calls back in time, as if they had been made and scored that long ago."""
+    import datetime as dt
+    from signal_room.db import Signal
+    db = factory()
+    for s in db.query(Signal).filter(Signal.agent_id == agent_id).all():
+        for col in ("submitted_at", "start_at", "resolve_at", "resolved_at"):
+            if getattr(s, col) is not None:
+                setattr(s, col, getattr(s, col) - dt.timedelta(days=days))
+    db.commit()
     db.close()
 
 
-def test_a_delisted_or_retired_wallet_keeps_counting_toward_the_board(client, session_factory):
-    """The decoy trick, through the room itself. Three wallets, each ranked on 30 scored calls."""
-    keeper, decoy, other = Agent(client, "keeper"), Agent(client, "decoy"), Agent(client, "other-decoy")
-    for bot in (keeper, decoy, other):
+def test_through_the_room_every_agent_ever_scored_counts_for_good(client, session_factory):
+    """The four tricks' common root, in the room itself: one keeper and four wallets an owner would like forgotten."""
+    keeper, short, quiet, thrown, gone = (Agent(client, n) for n in ("keeper", "one-short", "gone-quiet", "thrown-out", "retired"))
+    post_and_resolve(client, session_factory, keeper, 30, right=True)
+    post_and_resolve(client, session_factory, short, 29, right=True)          # never ranked
+    for bot in (quiet, thrown, gone):
+        post_and_resolve(client, session_factory, bot, 30, right=True)
+    spread(session_factory)
+    aged(session_factory, quiet.id, 200)                                       # silent for 200 days
+    db = session_factory()
+    db.query(AgentRow).filter(AgentRow.id == thrown.id).update({"status": "delisted"})
+    db.query(AgentRow).filter(AgentRow.id == gone.id).update({"status": "retired"})
+    db.commit()
+    assert service.board_size(db) == 5 and service.field_bar(db) == 30
+    rec = keeper.get(f"/agents/{keeper.id}").json()
+    # By hand: five agents have been scored here, so the keeper's odds are 5 x 6 = 30 times its odds alone.
+    assert rec["competitors"] == 30 and rec["p_luck"] == pytest.approx(min(1.0, 30 * rec["p_luck_alone"]), abs=2e-5)
+    assert [r["agent_id"] for r in service.leaderboard(db, None, None, "90d")] == [keeper.id]   # only the keeper is listed
+    db.close()
+
+
+def test_a_verdict_rests_on_the_whole_record_whatever_window_is_asked_for(client, session_factory):
+    """Thirty right calls 200 days ago, then four wrong ones this week. The 30- and 90-day views show the
+    four; the verdict, the odds and the ranges are the whole record's in every view."""
+    bot = Agent(client, "long-lived")
+    post_and_resolve(client, session_factory, bot, 30, right=True)
+    spread(session_factory)
+    aged(session_factory, bot.id, 200)
+    post_and_resolve(client, session_factory, bot, 4, right=False)
+    db = session_factory()
+    whole = service.agent_record(db, bot.id, None, "all")
+    assert whole["n"] == 34
+    for window in ("30d", "90d"):
+        view = service.agent_record(db, bot.id, None, window)
+        assert view["n"] == 4 and view["hit_rate"] == 0.0                      # what happened in the window
+        for key in service.WHOLE_RECORD:
+            assert view[key] == whole[key], (window, key)                      # what the verdict rests on
+    db.close()
+
+
+def test_a_yardstick_never_counts(client, session_factory, yardsticks):
+    a, stick = Agent(client, "a"), Agent(client, "momentum-control")
+    yardsticks("momentum.json", stick)
+    for bot in (a, stick):
         post_and_resolve(client, session_factory, bot, 30, right=True)
     spread(session_factory)
     db = session_factory()
-    assert service.board_size(db, service._since("90d")) == 3
-    before = keeper.get(f"/agents/{keeper.id}").json()
-    db.query(AgentRow).filter(AgentRow.id == decoy.id).update({"status": "delisted"})
-    db.query(AgentRow).filter(AgentRow.id == other.id).update({"status": "retired"})
-    db.commit()
-    assert service.board_size(db, service._since("90d")) == 3          # before 2026-11-11 this fell to 1
-    after = keeper.get(f"/agents/{keeper.id}").json()
-    # By hand: the keeper's bar is still raised 3x, so its odds are three times its odds alone.
-    assert after["competitors"] == 3 and after["p_luck"] == pytest.approx(min(1.0, 3 * after["p_luck_alone"]), rel=1e-5)
-    for key in ("p_luck", "p_worse", "verdict", "hit_rate_low", "hit_rate_high", "edge_low", "edge_high", "tries_to_next"):
-        assert after[key] == before[key], key
-    # The thrown-out wallets are off the leaderboard all the same; only the count remembers them.
-    assert [r["agent_id"] for r in service.leaderboard(db, None, None, "90d")] == [keeper.id]
-    db.close()
-
-
-def test_the_decoy_trick_is_held_to_the_line_once_every_ranked_wallet_counts():
-    # The simulation only. The room itself is held to it by the test above, which fails if the fix is undone.
-    assert attacks.open_rate(attacks.delisted_decoys, attacks.DECOYS, counted=False) > 0.15    # what it did before the fix
-    assert attacks.open_rate(attacks.delisted_decoys, attacks.DECOYS, counted=True) <= attacks.LEVEL
-
-
-def test_a_board_with_nobody_thrown_out_counts_as_it_always_did(client, session_factory, yardsticks):
-    """The fix changes nothing where no wallet has been delisted: two real bots, one yardstick, one unranked."""
-    a, b, short, stick = Agent(client, "a"), Agent(client, "b"), Agent(client, "short"), Agent(client, "momentum-control")
-    yardsticks("momentum.json", stick)
-    for bot, n in ((a, 30), (b, 30), (short, 29), (stick, 30)):
-        post_and_resolve(client, session_factory, bot, n, right=True)
-    spread(session_factory)
-    db = session_factory()
-    assert service.board_size(db, service._since("90d")) == 2
-    db.query(AgentRow).filter(AgentRow.id == stick.id).update({"status": "delisted"})    # a thrown-out yardstick still never counts
-    db.commit()
-    assert service.board_size(db, service._since("90d")) == 2
+    assert service.board_size(db) == 1 and service.field_bar(db) == 2
     db.close()
 
 

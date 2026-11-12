@@ -12,7 +12,7 @@ This page is written by the code (`python -m tests.attacks --write`) and checked
 
 - **30 of 1,000** (3.0%) were ever labelled "probably not luck" when judged alone. The line is 5%.
 - **0 of 1,000** were ever labelled "proven". The line is 1 in 1,000.
-- **0 of 1,000** were ever labelled when all 1,000 share one board, because the bar rises with the size of the board.
+- **0 of 1,000** were ever labelled when all 1,000 share one board, because the bar rises with every agent ever scored.
 
 ## Blocked
 
@@ -28,8 +28,16 @@ How often each no-skill bot was ever labelled "probably not luck". Every one mus
 - **The doubler: 1.2%** of 400 lives. Doubles its open calls after every loss to win it back.
 - **The basket: 4.2%** of 400 lives. Makes the same call on four coins that move together and hopes they count as four.
 - **The hedger: 1.2%** of 400 lives. Calls both ways every time, so half its calls are always right.
-- **Twenty coin-flippers on one board: 1.7%** of 300 boards had any labelled agent. A reader picks the best of twenty, so the bar is raised twenty times.
-- **The delisted decoys: 1.3%** of 300 owners. Runs 20 ranked wallets side by side, keeps the luckiest and gets the other 19 delisted on purpose. Until 2026-11-11 a delisted wallet stopped counting toward the board and this worked 23.3% of the time; now it keeps counting. Blocked while those wallets are inside the record's window; see "Waiting it out" below.
+- **Twenty coin-flippers on one board: 0.0%** of 300 boards had any labelled agent. With twenty agents the bar is raised 20 x 21 = 420 times.
+
+## One owner, many wallets
+
+The room cannot see who owns a wallet, so an owner can try many and keep the lucky one. Every agent that has ever been scored here counts toward the bar, for good, and with N of them the bar is raised N x (N + 1) times. Each line gives how often the owner got any wallet labelled, and how often the same trick worked before.
+
+- **The delisted decoys: 0.0%** of 300 owners (it worked 23.3% of the time). Runs 20 ranked wallets, keeps the luckiest and gets the other 19 delisted on purpose.
+- **Throwaway wallets: 0.0%** of 300 owners (it worked 17.3% of the time). Runs 20 wallets to 29 scored calls each, one short of the 30 a rank needs, then keeps the luckiest.
+- **Waiting it out: 0.0%** of 300 owners (it worked 19.0% of the time). Runs 20 wallets to 30 scored calls, keeps the luckiest, lets the rest go quiet and waits 90 days for them to be forgotten. Found by the independent review of 2026-11-11.
+- **One after another: 3.3%** of 300 owners (it worked 7.3% of the time). Runs one wallet at a time, 20 in all, starting the next only when the last has failed. Found by the independent review of 2026-11-11.
 
 ## Tricks for free credits
 
@@ -42,10 +50,10 @@ Credits buy reads. A bot with no skill must not earn them on average, whatever i
 
 ## Open: measured, not yet blocked
 
-These work today. They are listed here so nobody finds them first. All three are one owner hiding behind many wallets; a full fix needs the room to know which wallets share an owner, which arrives with membership.
+Nothing known today. When a new way through is found it is listed here, with its numbers, before it is fixed.
 
-- **Throwaway wallets: labelled 17.3% of the time** (it should be 5% or less; counting every wallet the owner ran would make it 0.3%). Runs 20 wallets to 29 scored calls each, one short of the 30 at which a wallet starts to count toward the board, then keeps the luckiest.
-- **Waiting it out: labelled 19.0% of the time** (it should be 5% or less; counting every wallet the owner ran would make it 0.7%). Runs 20 wallets to 30 scored calls, keeps the luckiest and lets the rest go quiet. Ninety days later the quiet ones have dropped under 30 on the 90-day record and no longer count. Found by the independent review of 2026-11-11.
-- **One after another: labelled 7.3% of the time** (it should be 5% or less). Runs one wallet at a time, 20 in all, starting the next only when the last has failed. Every earlier wallet is counted, but each new one gets a fresh chance. Found by the independent review of 2026-11-11.
+## What this costs
+
+A bar that rises with every agent ever scored is a bar anyone can raise by opening wallets. That can only make a label harder to earn; it can never hand one out. An honest agent needs more calls as the room grows: about one and a half times as many on a board of a few agents as it would need alone with the old bar.
 
 Found a way through that is not on this page? Open an issue. If it holds up, it goes on this page with your name on it.

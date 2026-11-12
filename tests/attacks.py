@@ -67,6 +67,11 @@ def best_odds(calls, field=1, after=0):
     return best
 
 
+def bar(agents):
+    """How many times the room raises the bar once this many agents have ever been scored: N x (N + 1)."""
+    return agents * (agents + 1)
+
+
 def priced(price, wins):
     """Payoff of one contract bought at this price, fee included, at the call's own odds."""
     bar = price + kalshi.fee(price)
@@ -210,7 +215,7 @@ def field_rate(runs: int = 300, seed: int = 111) -> float:
     """Share of boards of twenty coin-flippers on which any one of them was ever labelled, with the
     bar raised twenty times as the room does."""
     rng = random.Random(seed)
-    return sum(min(best_odds(life, field=20) for life in field_of_twenty(rng)) < LEVEL for _ in range(runs)) / runs
+    return sum(min(best_odds(life, field=bar(20)) for life in field_of_twenty(rng)) < LEVEL for _ in range(runs)) / runs
 
 
 @lru_cache(maxsize=None)
@@ -220,7 +225,7 @@ def monkeys(agents: int = 1000, calls: int = 500, seed: int = 2026) -> dict:
     best = [best_odds([(t, t + 1, WIN if rng.random() < 0.5 else LOSE) for t in range(calls)]) for _ in range(agents)]
     return {"agents": agents, "calls": calls,
             "labelled": sum(b < LEVEL for b in best), "proven": sum(b < PROVEN for b in best),
-            "labelled_on_one_board": sum(agents * b < LEVEL for b in best)}
+            "labelled_on_one_board": sum(bar(agents) * b < LEVEL for b in best)}
 
 
 # ---------- credits: tricks that try to mint reads, not labels ----------
@@ -272,7 +277,7 @@ def open_rate(trick, wallets: int, counted: bool, runs: int = 300, seed: int = 4
     (what the room does today)."""
     rng = random.Random(seed + wallets)
     need = config.MIN_RESOLVED_FOR_RANK
-    return sum(best_odds(trick(rng, wallets), field=wallets if counted else 1, after=need) < LEVEL
+    return sum(best_odds(trick(rng, wallets), field=bar(wallets) if counted else 1, after=need) < LEVEL
                for _ in range(runs)) / runs
 
 
@@ -287,27 +292,29 @@ def waited_out(rng, wallets):
 
 
 @lru_cache(maxsize=None)
-def one_after_another(wallets: int = 20, runs: int = 300, seed: int = 505) -> float:
+def one_after_another(counted: bool = True, wallets: int = 20, runs: int = 300, seed: int = 505) -> float:
     """Runs one wallet at a time, and starts the next only when the last has failed to be labelled.
-    Every earlier wallet is counted, so wallet k faces a bar raised k times, and no more: the later
-    ones did not exist yet when it was judged. Share of owners with any wallet ever labelled."""
+    Wallet k is judged while k wallets have been scored, so it faces a bar of k x (k + 1) (counted), or
+    of k as the room raised it until 2026-11-12. Share of owners with any wallet ever labelled."""
     rng, need, hit = random.Random(seed), config.MIN_RESOLVED_FOR_RANK, 0
     for _ in range(runs):
         for k in range(1, wallets + 1):
             life = [(t, t + 1, WIN if rng.random() < 0.5 else LOSE) for t in range(300)]
-            if best_odds(life, field=k, after=need) < LEVEL:
+            if best_odds(life, field=bar(k) if counted else k, after=need) < LEVEL:
                 hit += 1
                 break
     return hit / runs
 
 
-OPEN = [
-    ("Throwaway wallets", "Runs 20 wallets to 29 scored calls each, one short of the 30 at which a wallet starts to count toward the board, then keeps the luckiest.", throwaway_wallets, 20),
-    ("Waiting it out", "Runs 20 wallets to 30 scored calls, keeps the luckiest and lets the rest go quiet. Ninety days later the quiet ones have dropped under 30 on the 90-day record and no longer count. Found by the independent review of 2026-11-11.", waited_out, 20),
+# One owner behind many wallets, four ways. All four worked until 2026-11-12 (the first until 2026-11-11);
+# every agent ever scored now counts, for good, and the bar is N x (N + 1).
+MANY_WALLETS = [
+    ("The delisted decoys", "Runs 20 ranked wallets, keeps the luckiest and gets the other 19 delisted on purpose.", delisted_decoys),
+    ("Throwaway wallets", "Runs 20 wallets to 29 scored calls each, one short of the 30 a rank needs, then keeps the luckiest.", throwaway_wallets),
+    ("Waiting it out", "Runs 20 wallets to 30 scored calls, keeps the luckiest, lets the rest go quiet and waits 90 days for them to be forgotten. Found by the independent review of 2026-11-11.", waited_out),
 ]
-
-# Closed 2026-11-11: a wallet that was ranked keeps counting toward the board after it is delisted.
-DECOYS = 20
+WALLETS = 20
+OPEN: list = []      # nothing known. A new way through goes here, measured, before it is fixed.
 
 
 def pct(x):
@@ -328,29 +335,35 @@ def page() -> str:
            f"{m['agents']:,} coin-flip agents, {m['calls']} calls each, checked after every call:", "",
            f"- **{m['labelled']} of {m['agents']:,}** ({pct(m['labelled'] / m['agents'])}) were ever labelled \"probably not luck\" when judged alone. The line is 5%.",
            f"- **{m['proven']} of {m['agents']:,}** were ever labelled \"proven\". The line is 1 in 1,000.",
-           f"- **{m['labelled_on_one_board']} of {m['agents']:,}** were ever labelled when all {m['agents']:,} share one board, because the bar rises with the size of the board.", "",
+           f"- **{m['labelled_on_one_board']} of {m['agents']:,}** were ever labelled when all {m['agents']:,} share one board, because the bar rises with every agent ever scored.", "",
            "## Blocked", "",
            "How often each no-skill bot was ever labelled \"probably not luck\". Every one must stay at or under 5%.", ""]
     for a in BLOCKED:
         out.append(f"- **{a.name}: {pct(rate(a))}** of {a.runs} lives. {a.trick}")
     out.append(f"- **Twenty coin-flippers on one board: {pct(field_rate())}** of 300 boards had any labelled agent. "
-               "A reader picks the best of twenty, so the bar is raised twenty times.")
-    out.append(f"- **The delisted decoys: {pct(open_rate(delisted_decoys, DECOYS, True))}** of 300 owners. Runs 20 ranked wallets side by side, keeps the "
-               f"luckiest and gets the other 19 delisted on purpose. Until 2026-11-11 a delisted wallet stopped counting toward the "
-               f"board and this worked {pct(open_rate(delisted_decoys, DECOYS, False))} of the time; now it keeps counting. "
-               "Blocked while those wallets are inside the record's window; see \"Waiting it out\" below.")
+               "With twenty agents the bar is raised 20 x 21 = 420 times.")
+    out += ["", "## One owner, many wallets", "",
+            "The room cannot see who owns a wallet, so an owner can try many and keep the lucky one. Every agent that has ever "
+            "been scored here counts toward the bar, for good, and with N of them the bar is raised N x (N + 1) times. "
+            "Each line gives how often the owner got any wallet labelled, and how often the same trick worked before.", ""]
+    for name, trick, life in MANY_WALLETS:
+        out.append(f"- **{name}: {pct(open_rate(life, WALLETS, True))}** of 300 owners (it worked {pct(open_rate(life, WALLETS, False))} of the time). {trick}")
+    out.append(f"- **One after another: {pct(one_after_another(True))}** of 300 owners (it worked {pct(one_after_another(False))} of the time). "
+               "Runs one wallet at a time, 20 in all, starting the next only when the last has failed. Found by the independent review of 2026-11-11.")
     out += ["", "## Tricks for free credits", "",
             "Credits buy reads. A bot with no skill must not earn them on average, whatever it says.", ""]
     for name, trick, credit in credit_tricks():
         out.append(f"- **{name}: {credit:+.2f} credits a call.** {trick}")
-    out += ["", "## Open: measured, not yet blocked", "",
-            "These work today. They are listed here so nobody finds them first. All three are one owner hiding behind many wallets; a full fix needs the room to know which wallets share an owner, which arrives with membership.", ""]
-    for name, trick, life, wallets in OPEN:
-        out.append(f"- **{name}: labelled {pct(open_rate(life, wallets, False))} of the time** (it should be 5% or less; "
-                   f"counting every wallet the owner ran would make it {pct(open_rate(life, wallets, True))}). {trick}")
-    out.append(f"- **One after another: labelled {pct(one_after_another())} of the time** (it should be 5% or less). Runs one wallet at a time, "
-               "20 in all, starting the next only when the last has failed. Every earlier wallet is counted, but each new one gets a fresh "
-               "chance. Found by the independent review of 2026-11-11.")
+    out += ["", "## Open: measured, not yet blocked", ""]
+    if OPEN:
+        for name, trick, measured in OPEN:
+            out.append(f"- **{name}: labelled {pct(measured())} of the time** (it should be 5% or less). {trick}")
+    else:
+        out.append("Nothing known today. When a new way through is found it is listed here, with its numbers, before it is fixed.")
+    out += ["", "## What this costs", "",
+            "A bar that rises with every agent ever scored is a bar anyone can raise by opening wallets. That can only make a "
+            "label harder to earn; it can never hand one out. An honest agent needs more calls as the room grows: about one and "
+            "a half times as many on a board of a few agents as it would need alone with the old bar."]
     out += ["", "Found a way through that is not on this page? Open an issue. If it holds up, it goes on this page with your name on it.", ""]
     return "\n".join(out)
 
