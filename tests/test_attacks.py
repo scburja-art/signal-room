@@ -101,6 +101,10 @@ def test_open_gap_many_wallets_keep_the_lucky_one(name, trick, life, wallets):
     assert attacks.open_rate(life, wallets, counted=True) <= attacks.LEVEL     # what counting every wallet would do
 
 
+def test_open_gap_wallets_run_one_after_another():
+    assert attacks.one_after_another() > attacks.LEVEL, "one after another no longer works: move it to the blocked list"
+
+
 def test_open_gap_a_wallet_under_thirty_calls_is_not_counted(client, session_factory):
     ranked, short = Agent(client, "ranked"), Agent(client, "one-short")
     post_and_resolve(client, session_factory, ranked, 30, right=True)
@@ -135,6 +139,7 @@ def test_a_delisted_or_retired_wallet_keeps_counting_toward_the_board(client, se
 
 
 def test_the_decoy_trick_is_held_to_the_line_once_every_ranked_wallet_counts():
+    # The simulation only. The room itself is held to it by the test above, which fails if the fix is undone.
     assert attacks.open_rate(attacks.delisted_decoys, attacks.DECOYS, counted=False) > 0.15    # what it did before the fix
     assert attacks.open_rate(attacks.delisted_decoys, attacks.DECOYS, counted=True) <= attacks.LEVEL
 
