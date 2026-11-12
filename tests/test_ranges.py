@@ -119,7 +119,7 @@ def test_competitors_raise_the_bar_by_hand():
     assert flip.p_luck == 1.0
 
 
-def test_board_size_counts_ranked_active_agents(client, session_factory):
+def test_board_size_counts_every_agent_ranked_in_the_window(client, session_factory):
     from signal_room import service
     from signal_room.db import Agent as AgentRow
     from tests.api_helpers import Agent
@@ -134,7 +134,8 @@ def test_board_size_counts_ranked_active_agents(client, session_factory):
     assert service.board_size(db, service._since("90d")) == 2
     rec = a.get(f"/agents/{a.id}").json()
     assert rec["competitors"] == 2 and rec["p_luck"] == pytest.approx(min(1.0, 2 * rec["p_luck_alone"]), rel=1e-5)
-    # A delisted agent leaves the field.
+    # A delisted agent still counts (since 2026-11-11; until then it left the field, which let an owner
+    # run many wallets, keep the luckiest and have the rest thrown out).
     db.query(AgentRow).filter_by(id=b.id).first().status = "delisted"
     db.commit()
-    assert service.board_size(db, service._since("90d")) == 1
+    assert service.board_size(db, service._since("90d")) == 2
