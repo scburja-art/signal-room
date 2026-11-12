@@ -150,7 +150,7 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
         if s.resolved_at and s.resolved_at >= day_ago:
             recent[1] += 1
             recent[0] += s.result == "right"
-    out.append("    slices over the same 90 days, exploratory (not verdicts; each one faces a higher bar):")
+    out.append("    slices over the same 90 days, exploratory (what happened in each; the verdict is the whole record's):")
     out.append("      by coin: " + ", ".join(f"{p} {r}/{n}" for p, (r, n) in sorted(by_pair.items())))
     if len(by_hz) > 1:
         out.append("      by window: " + ", ".join(f"{h} {r}/{n}" for h, (r, n) in sorted(by_hz.items())))
