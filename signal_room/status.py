@@ -55,6 +55,7 @@ VERDICT_WORDS = {
     "worse_than_chance": "Worse than chance",
     "delisted": "Delisted",
     "retired": "Retired",
+    "control": "Control",
 }
 
 
@@ -105,6 +106,8 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
         odds = f"{nobody} does this well {luck(rec['p_luck'])}"
     field = f"; bar raised {rec['competitors']}x for the {rec['competitors']} ranked bots a reader chooses among" if rec["competitors"] > 1 else ""
     out.append(f"    {odds}, over {rec['tries']} separate tries (calls that share market time count once){field}")
+    if rec["verdict"] == "control":
+        out.append("    a yardstick: its numbers are there to compare against; it gets no verdict and does not count toward the board")
     if not rec["ranked"]:
         out.append(f"    needs {config.MIN_RESOLVED_FOR_RANK - rec['n']} more scored signals to be ranked")
     if progress(rec):

@@ -33,7 +33,9 @@ def verdict_before(db, agent: Agent, start: dt.datetime) -> str | None:
             .order_by(Signal.resolved_at).all())
     if not rows:
         return None
-    return agent.status if agent.status != "active" else service._record(rows, 1, start)["verdict"]
+    if agent.status != "active":
+        return agent.status
+    return "control" if agent.id in service.control_ids(db) else service._record(rows, 1, start)["verdict"]
 
 
 def bot_lines(db, agent: Agent, start: dt.datetime, end: dt.datetime) -> list[str] | None:

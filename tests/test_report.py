@@ -22,7 +22,7 @@ def test_bar_marks_coin_flip():
 
 
 def test_report_counts_window_and_verdict_change(client, session_factory):
-    good = ApiAgent(client, "momentum-control")
+    good = ApiAgent(client, "forecaster-v1")
     post_and_resolve(client, session_factory, good, 30, right=True, confidence=0.8)
     post_and_resolve(client, session_factory, good, 3, right=False, confidence=0.8)
 
@@ -39,7 +39,7 @@ def test_report_counts_window_and_verdict_change(client, session_factory):
 
     text = report.report(session_factory(), now=now)
     assert "10 new calls, 10 closed: 7 right, 3 wrong (70% right" in text
-    assert "Momentum\n  ██████████│████······  right 70% (7 of 10)" in text
+    assert "Forecaster v1\n  ██████████│████······  right 70% (7 of 10)" in text
     # Before the window: 23 scored, under the 30 needed, so Unproven. After: 33 scored.
     assert "verdict moved: Unproven →" in text
 
@@ -98,3 +98,12 @@ def test_report_counts_priced_calls_against_their_cost(client, session_factory):
     assert "11 closed: 8 right, 2 wrong, 1 not filled (80% right; a coin flip is 50%; priced calls are judged against what they cost)" in text
     assert "right 80% (8 of 10), cost 80%, 1 not filled" in text
     s.close()
+
+
+def test_a_yardstick_s_report_line_says_control(client, session_factory):
+    good = ApiAgent(client, "momentum-control")
+    post_and_resolve(client, session_factory, good, 33, right=True, confidence=0.8)
+    now = dt.datetime(2026, 11, 4, 12, 0)
+    spread(session_factory, end=now - dt.timedelta(hours=1))
+    text = report.report(session_factory(), now=now)
+    assert "verdict: Control (unchanged)" in text and "verdict moved" not in text

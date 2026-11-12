@@ -122,8 +122,9 @@ def test_scoreboard_draws_from_the_database(client, session_factory, monkeypatch
     header = next(line for line in lines if "Verdict" in line)
     row = next(line for line in lines if "Momentum" in line)
     assert header.split() == ["Bot", "Verdict", "Right", "vs.", "its", "bar", "Calls", "Next", "step"]
-    # 3 of 3 right at 60%: skill = 1 - 0.16/0.25 = +0.36 → 36 points better; unproven, so no next step.
-    assert row.split() == ["Momentum", "Unproven", "100%", "▲", "36", "better", "3", "—"]
+    # 3 of 3 right at 60%: skill = 1 - 0.16/0.25 = +0.36 → 36 points better. Momentum is one of the room's
+    # yardsticks: it shows as a control, not a verdict, and has no next step.
+    assert row.split() == ["Momentum", "Control", "100%", "▲", "36", "better", "3", "—"]
     assert header.index("Calls") + len("Calls") == row.index("3 ") + 1      # numbers right-align under their header
     assert any("Ladder: Unproven → Luck → Probably not luck → Proven" in line for line in lines)
 

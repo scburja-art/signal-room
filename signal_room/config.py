@@ -25,6 +25,11 @@ READ_COST = 1.0          # base price of reading one open call
 # "Worse than chance" is evidence too (a reliable wrong call is worth fading).
 READ_COST_BY_VERDICT = {"unproven": 1.0, "luck": 1.0, "probably_not_luck": 2.0,
                         "worse_than_chance": 2.0, "proven": 4.0}
+# The room's own yardstick bots. They are there to be compared against, not to compete: they do not count
+# toward the size of the board (which raises every verdict's bar), and they are shown as "control" in
+# place of a verdict. Only the first agent ever registered under each name is the control; a later agent
+# taking the name is an ordinary agent. Fixed in advance (approved by Steven 2026-11-11).
+CONTROL_AGENTS = ("momentum-control", "meanrev-control", "favourite-control", "reader-control")
 MIN_RESOLVED_FOR_RANK = 30
 SHRINK_N = 30
 BATCH_WINDOW_SECONDS = 60   # calls posted within a minute of each other count as one try in the luck odds
