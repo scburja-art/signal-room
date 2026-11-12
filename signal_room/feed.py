@@ -3,7 +3,7 @@
 Reads every log line, hides routine noise, and turns what is left into one plain sentence per thing
 that happened: a call posted (sealed), a call scored (revealed, right or wrong), a paid read, a bot
 delisted, a problem. Every bot has its own color. A short scoreboard prints at start and after
-scoring, at most every half hour.
+scoring, at most every ten minutes.
 
     tail -F logs/*.log | python -m signal_room.feed
 """
@@ -355,7 +355,7 @@ def scoreboard(color: bool = True) -> list[str]:
         db.close()
 
 
-BOARD_EVERY_SECONDS = 1800
+BOARD_EVERY_SECONDS = 600
 ROUND_DONE = re.compile(r"tick \{.*'resolved': [1-9]")
 
 
