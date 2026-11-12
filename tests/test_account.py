@@ -12,6 +12,7 @@ import pytest
 
 from signal_room import scoring
 from signal_room.scoring import Timeline
+from tests.attacks import Book
 from tests.frozen import scoring_rule_set_3 as old
 
 
@@ -120,24 +121,6 @@ def test_with_the_old_five_stakes_a_record_that_never_overlaps_gets_the_old_odds
 
 
 # ---------- the review's trick, and why the account is immune ----------
-
-class Book:
-    """The same account kept by hand as the calls happen, so a simulation can look after every close."""
-
-    def __init__(self):
-        self.cash = [1.0] * len(scoring.STAKES)
-        self.held = {}
-
-    def open(self, key):
-        self.held[key] = [s * c for s, c in zip(scoring.STAKES, self.cash)]
-        self.cash = [c - h for c, h in zip(self.cash, self.held[key])]
-
-    def close(self, key, payoff):
-        self.cash = [c + h * (1 + payoff) for c, h in zip(self.cash, self.held.pop(key))]
-
-    def odds(self):
-        return min(1.0, len(self.cash) / sum(self.cash))
-
 
 def padding_bot(rng, windows, priced):
     """No edge anywhere. One fair call at the start of each window. If it is losing late on, three more

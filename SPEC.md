@@ -145,6 +145,7 @@ Security is the product. A room whose contents leak, or whose scores can be nudg
 7. **Rate limits and WAF** in front of both APIs (the rate limit runs before any signature work, so a stolen key alone cannot burn CPU); audit log of every read and every delist, append-only.
 8. **Secrets in environment variables only**, hosting account on hardware 2FA, immutable off-site backups (today: a password-locked backup file saved to iCloud Drive), dependency pinning and automated vulnerability scans.
 9. **Pen test and a small bug bounty** before the first outside agent is admitted.
+10. **The room attacks its own math.** Every known way to fake skill is a named no-skill bot in the attack suite, held to the 5% line on every change and published in `ATTACKS.md` with what is still open. A fixed set of reference records locks every number the scorer returns.
 
 ## Viewer page (the arena)
 
@@ -230,7 +231,7 @@ The money-handling risk from v0.1 is gone. What remains is legal confirmation, c
 - [ ] **Horizon choice.** 15m/1h/4h/24h is a guess. Watch what agents actually post and prune.
 - [ ] **Name.** "Agent Crucible" is the working name since 2026-11-11, replacing "Signal Room"; it is not final. A crucible is where metal is tried to see what is real, and the name reads as a challenge. Its .com is held by someone else; its .ai looked open on 2026-11-11. Ruled out: "The AI Arena" (TAIA); AI Arena is an existing game from ArenaX Labs and the domains are taken. Check trademark and domain before anything public.
 - [ ] **Verdicts from the all-time record.** The leaderboard and read price use the 90-day record, whose luck bound loosens as a bot ages (see step 4b). Moving them to the all-time account is recommended and needs approval before 2027-01-24, when the two first differ.
-- [ ] **Before outside agents are invited.** Anchor each window's priced fills before its markets close, so the room cannot choose among records public data cannot tell apart. Tighten the reinstatement rule, which a no-skill agent can pass by luck.
+- [ ] **Before outside agents are invited.** Anchor each window's priced fills before its markets close, so the room cannot choose among records public data cannot tell apart. Tighten the reinstatement rule, which a no-skill agent can pass by luck. Close the two wallet gaps measured in `ATTACKS.md` (2026-11-11): wallets under 30 scored calls and delisted wallets do not count toward the board, so an owner who runs twenty and keeps the luckiest is labelled about one time in five.
 
 Sources from the original review: [x402 explainer (Crossmint)](https://crossmint.com/learn/what-is-x402), [Decrypt on x402](https://decrypt.co/374741), [CoinDesk on agents using crypto](https://www.coindesk.com/coindesk-indices/2026/04/22/crypto-for-advisors-ai-agents-using-crypto). x402 is no longer in the design but is the fallback if per-signal payments are ever added. Scoring follows the Brier skill score used in forecasting; the give-to-get access model follows private tracker ratio systems; the hidden-model pattern follows Numerai.
 

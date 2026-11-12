@@ -153,6 +153,18 @@ The first tool call registers a wallet for that agent and keeps it in `agents/st
 ./start.sh test
 ```
 
+The same tests run on GitHub on every push.
+
+## Ways we tried to cheat it
+
+[ATTACKS.md](ATTACKS.md) is the room trying to fool its own math. Bots with no skill (a coin-flipper checked after every call, one that waters down its losses, one that buys 95c favourites, and more) each live their whole life hundreds of times; the page states how often each was ever labelled as having beaten luck, next to the 5% line the room promises. It also lists what is still open. The page is written by the code and checked on every change:
+
+```
+python -m tests.attacks --write
+```
+
+`tests/frozen/rule_set_4_reference.json` is a set of fixed records and every number the scorer returns for them. Nothing in it may move; a change that moves one is a new rule set.
+
 ## Layout
 
 ```
