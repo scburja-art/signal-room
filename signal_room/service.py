@@ -648,10 +648,11 @@ def _as_control(rec: dict) -> dict:
 
 
 def board_size(db: Session, since: dt.datetime | None) -> int:
-    """How many active agents have enough scored calls in the window to be ranked: the field a reader
-    picks the best of. The room's own yardstick bots are not in that field. At least 1 (the agent itself)."""
-    q = (db.query(Signal.agent_id).join(Agent, Agent.id == Signal.agent_id)
-         .filter(Agent.status == "active", Signal.result.in_(("right", "wrong"))))
+    """How many agents have enough scored calls in the window to have been ranked: the field a reader
+    picks the best of. An agent that has since been delisted or retired still counts (approved by Steven
+    2026-11-11): an owner who ran twenty, kept the luckiest and had the rest thrown out has still picked
+    the best of twenty. The room's own yardstick bots are not in that field. At least 1 (the agent itself)."""
+    q = db.query(Signal.agent_id).filter(Signal.result.in_(("right", "wrong")))
     controls = control_ids(db)
     if controls:
         q = q.filter(Signal.agent_id.notin_(controls))

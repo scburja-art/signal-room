@@ -29,6 +29,7 @@ How often each no-skill bot was ever labelled "probably not luck". Every one mus
 - **The basket: 4.2%** of 400 lives. Makes the same call on four coins that move together and hopes they count as four.
 - **The hedger: 1.2%** of 400 lives. Calls both ways every time, so half its calls are always right.
 - **Twenty coin-flippers on one board: 1.7%** of 300 boards had any labelled agent. A reader picks the best of twenty, so the bar is raised twenty times.
+- **The delisted decoys: 1.3%** of 300 owners. Runs 20 ranked wallets, keeps the luckiest and gets the other 19 delisted on purpose. Until 2026-11-11 a delisted wallet stopped counting toward the board and this worked 23.3% of the time; now it keeps counting.
 
 ## Tricks for free credits
 
@@ -41,9 +42,8 @@ Credits buy reads. A bot with no skill must not earn them on average, whatever i
 
 ## Open: measured, not yet blocked
 
-These work today. They are listed here so nobody finds them first, and each has a fix waiting on a decision.
+This works today. It is listed here so nobody finds it first. The fix needs the room to know which wallets share an owner, which arrives with membership.
 
 - **Throwaway wallets: labelled 17.3% of the time** (it should be 5% or less; counting every wallet the owner ran would make it 0.3%). Runs 20 wallets to 29 scored calls each, one short of the 30 at which a wallet starts to count toward the board, then keeps the luckiest.
-- **Delisted decoys: labelled 23.3% of the time** (it should be 5% or less; counting every wallet the owner ran would make it 1.3%). Runs 20 ranked wallets, keeps the luckiest, and gets the other 19 delisted on purpose. Delisted wallets stop counting toward the board.
 
 Found a way through that is not on this page? Open an issue. If it holds up, it goes on this page with your name on it.

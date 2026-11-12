@@ -92,8 +92,8 @@ def test_the_loud_coin_flipper_is_delisted():
 
 
 # ---------- open: measured, not yet blocked ----------
-# Each of these passes because the gap is there. When a fix lands, the first assertion in each fails:
-# move the attack to BLOCKED and turn the test round.
+# This passes because the gap is there. When a fix lands, its first assertion fails: move the attack to
+# the blocked list and turn the test round, as was done for the delisted decoys on 2026-11-11.
 
 @pytest.mark.parametrize("name,trick,life,wallets", attacks.OPEN, ids=lambda v: v if isinstance(v, str) and len(v) < 30 else "")
 def test_open_gap_many_wallets_keep_the_lucky_one(name, trick, life, wallets):
@@ -111,16 +111,46 @@ def test_open_gap_a_wallet_under_thirty_calls_is_not_counted(client, session_fac
     db.close()
 
 
-def test_open_gap_a_delisted_wallet_stops_counting(client, session_factory):
-    a, b = Agent(client, "keeper"), Agent(client, "decoy")
-    for bot in (a, b):
+def test_a_delisted_or_retired_wallet_keeps_counting_toward_the_board(client, session_factory):
+    """The decoy trick, through the room itself. Three wallets, each ranked on 30 scored calls."""
+    keeper, decoy, other = Agent(client, "keeper"), Agent(client, "decoy"), Agent(client, "other-decoy")
+    for bot in (keeper, decoy, other):
         post_and_resolve(client, session_factory, bot, 30, right=True)
     spread(session_factory)
     db = session_factory()
-    assert service.board_size(db, service._since("90d")) == 2
-    db.query(AgentRow).filter(AgentRow.id == b.id).update({"status": "delisted"})
+    assert service.board_size(db, service._since("90d")) == 3
+    before = keeper.get(f"/agents/{keeper.id}").json()
+    db.query(AgentRow).filter(AgentRow.id == decoy.id).update({"status": "delisted"})
+    db.query(AgentRow).filter(AgentRow.id == other.id).update({"status": "retired"})
     db.commit()
-    assert service.board_size(db, service._since("90d")) == 1
+    assert service.board_size(db, service._since("90d")) == 3          # before 2026-11-11 this fell to 1
+    after = keeper.get(f"/agents/{keeper.id}").json()
+    # By hand: the keeper's bar is still raised 3x, so its odds are three times its odds alone.
+    assert after["competitors"] == 3 and after["p_luck"] == pytest.approx(min(1.0, 3 * after["p_luck_alone"]), rel=1e-5)
+    for key in ("p_luck", "p_worse", "verdict", "hit_rate_low", "hit_rate_high", "edge_low", "edge_high", "tries_to_next"):
+        assert after[key] == before[key], key
+    # The thrown-out wallets are off the leaderboard all the same; only the count remembers them.
+    assert [r["agent_id"] for r in service.leaderboard(db, None, None, "90d")] == [keeper.id]
+    db.close()
+
+
+def test_the_decoy_trick_is_held_to_the_line_once_every_ranked_wallet_counts():
+    assert attacks.open_rate(attacks.delisted_decoys, attacks.DECOYS, counted=False) > 0.15    # what it did before the fix
+    assert attacks.open_rate(attacks.delisted_decoys, attacks.DECOYS, counted=True) <= attacks.LEVEL
+
+
+def test_a_board_with_nobody_thrown_out_counts_as_it_always_did(client, session_factory, yardsticks):
+    """The fix changes nothing where no wallet has been delisted: two real bots, one yardstick, one unranked."""
+    a, b, short, stick = Agent(client, "a"), Agent(client, "b"), Agent(client, "short"), Agent(client, "momentum-control")
+    yardsticks("momentum.json", stick)
+    for bot, n in ((a, 30), (b, 30), (short, 29), (stick, 30)):
+        post_and_resolve(client, session_factory, bot, n, right=True)
+    spread(session_factory)
+    db = session_factory()
+    assert service.board_size(db, service._since("90d")) == 2
+    db.query(AgentRow).filter(AgentRow.id == stick.id).update({"status": "delisted"})    # a thrown-out yardstick still never counts
+    db.commit()
+    assert service.board_size(db, service._since("90d")) == 2
     db.close()
 
 

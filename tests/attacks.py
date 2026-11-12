@@ -258,8 +258,8 @@ def throwaway_wallets(rng, wallets):
 
 def delisted_decoys(rng, wallets):
     """Runs many ranked wallets for 60 quiet coin flips, keeps the luckiest, then has every other wallet
-    shout 99% until the room delists it. A delisted wallet no longer counts toward the board, so the
-    kept one faces the bar of a board of one. Returns the kept life."""
+    shout 99% until the room delists it. Until 2026-11-11 a delisted wallet stopped counting toward the
+    board, so the kept one faced the bar of a board of one. Returns the kept life."""
     lives = [[(t, t + 1, WIN if rng.random() < 0.5 else LOSE) for t in range(60)] for _ in range(wallets)]
     kept = max(lives, key=lambda life: sum(x for _, _, x in life))
     return kept + [(t, t + 1, WIN if rng.random() < 0.5 else LOSE) for t in range(60, 300)]
@@ -278,8 +278,10 @@ def open_rate(trick, wallets: int, counted: bool, runs: int = 300, seed: int = 4
 
 OPEN = [
     ("Throwaway wallets", "Runs 20 wallets to 29 scored calls each, one short of the 30 at which a wallet starts to count toward the board, then keeps the luckiest.", throwaway_wallets, 20),
-    ("Delisted decoys", "Runs 20 ranked wallets, keeps the luckiest, and gets the other 19 delisted on purpose. Delisted wallets stop counting toward the board.", delisted_decoys, 20),
 ]
+
+# Closed 2026-11-11: a wallet that was ranked keeps counting toward the board after it is delisted.
+DECOYS = 20
 
 
 def pct(x):
@@ -307,12 +309,15 @@ def page() -> str:
         out.append(f"- **{a.name}: {pct(rate(a))}** of {a.runs} lives. {a.trick}")
     out.append(f"- **Twenty coin-flippers on one board: {pct(field_rate())}** of 300 boards had any labelled agent. "
                "A reader picks the best of twenty, so the bar is raised twenty times.")
+    out.append(f"- **The delisted decoys: {pct(open_rate(delisted_decoys, DECOYS, True))}** of 300 owners. Runs 20 ranked wallets, keeps the "
+               f"luckiest and gets the other 19 delisted on purpose. Until 2026-11-11 a delisted wallet stopped counting toward the "
+               f"board and this worked {pct(open_rate(delisted_decoys, DECOYS, False))} of the time; now it keeps counting.")
     out += ["", "## Tricks for free credits", "",
             "Credits buy reads. A bot with no skill must not earn them on average, whatever it says.", ""]
     for name, trick, credit in credit_tricks():
         out.append(f"- **{name}: {credit:+.2f} credits a call.** {trick}")
     out += ["", "## Open: measured, not yet blocked", "",
-            "These work today. They are listed here so nobody finds them first, and each has a fix waiting on a decision.", ""]
+            "This works today. It is listed here so nobody finds it first. The fix needs the room to know which wallets share an owner, which arrives with membership.", ""]
     for name, trick, life, wallets in OPEN:
         out.append(f"- **{name}: labelled {pct(open_rate(life, wallets, False))} of the time** (it should be 5% or less; "
                    f"counting every wallet the owner ran would make it {pct(open_rate(life, wallets, True))}). {trick}")
