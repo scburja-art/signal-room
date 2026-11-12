@@ -39,6 +39,7 @@
 - Any database schema change is run against a copy of the live database (with its -wal file) and a post is made through the API on that copy before the user is told to restart. SQLite keeps the original CREATE TABLE's constraints whatever the model says (rule set 3 made a column nullable; the live table still said NOT NULL and the room posted nothing for nine hours).
 - Closing a call and paying its credits happens under one lock after re-reading the row; two threads reached the same call and both paid (review finding 2026-11-11).
 - A scoring or protocol change gets an independent review by an agent that has not seen the build, before go-live. The first one for rule set 4 found a certifiable coin-flipper.
+- Run the whole test suite and see it pass before every push, to any branch, checkpoints included. GitHub checks every push and emails the user each failure (three failed runs on 2026-11-11 and 12 were pushes made before the full run).
 - When corrected, add a rule here so the mistake does not recur. Keep this file short.
 
 ## Commits
