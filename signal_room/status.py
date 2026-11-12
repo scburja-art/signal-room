@@ -100,11 +100,12 @@ def agent_lines(db, a: Agent, now: dt.datetime) -> list[str]:
         return out
     out.append("    " + headline(rec))
     nobody = "a bot with no edge over its prices" if rec.get("priced") else "a coin-flipper"
-    if rec["verdict"] == "worse_than_chance":
-        odds = f"{nobody} does this badly {luck(rec['p_worse'])}"
+    if rec["verdict"] == "worse_than_chance" or (rec["verdict"] == "control" and rec["p_worse"] < rec["p_luck"]):
+        odds = f"{nobody} does this badly {luck(rec['p_worse'])}"   # for a yardstick, whichever way its light points
     else:
         odds = f"{nobody} does this well {luck(rec['p_luck'])}"
-    field = f"; bar raised {rec['competitors']}x for the {rec['competitors']} ranked bots a reader chooses among" if rec["competitors"] > 1 else ""
+    field = (f"; bar raised {rec['competitors']}x for the {rec['competitors']} ranked bots a reader chooses among"
+             if rec["competitors"] > 1 and rec["verdict"] != "control" else "")
     out.append(f"    {odds}, over {rec['tries']} separate tries (calls that share market time count once){field}")
     if rec["verdict"] == "control":
         out.append("    a yardstick: its numbers are there to compare against; it gets no verdict and does not count toward the board")
@@ -177,7 +178,8 @@ def report(db) -> str:
     lines.append("Leaderboard (90-day window, ranked agents only):")
     if board:
         for r in board:
-            lines.append(f"  {r['rank']}. {r['name']}  {headline(r)}  ({r['n']} scored, {r['tries']} tries)")
+            place = "–" if r["rank"] is None else f"{r['rank']}."
+            lines.append(f"  {place} {r['name']}  {headline(r)}  ({r['n']} scored, {r['tries']} tries)")
     else:
         lines.append(f"  nobody ranked yet (needs {config.MIN_RESOLVED_FOR_RANK} scored signals)")
     lines.append("")

@@ -27,9 +27,15 @@ READ_COST_BY_VERDICT = {"unproven": 1.0, "luck": 1.0, "probably_not_luck": 2.0,
                         "worse_than_chance": 2.0, "proven": 4.0}
 # The room's own yardstick bots. They are there to be compared against, not to compete: they do not count
 # toward the size of the board (which raises every verdict's bar), and they are shown as "control" in
-# place of a verdict. Only the first agent ever registered under each name is the control; a later agent
-# taking the name is an ordinary agent. Fixed in advance (approved by Steven 2026-11-11).
-CONTROL_AGENTS = ("momentum-control", "meanrev-control", "favourite-control", "reader-control")
+# place of a verdict (approved by Steven 2026-11-11). A yardstick is known by who it is, never by what
+# it calls itself: names are free text anyone can register. Each seed bot keeps its identity in a file
+# in this room's own state directory, which only the operator can write; the agent named there is the
+# control. If a bot is registered afresh, its new file follows it. SIGNAL_ROOM_CONTROL_IDS (agent ids,
+# comma-separated) replaces the files, for a room whose bots run on another machine.
+CONTROL_STATE_FILES = ("momentum.json", "meanrev.json", "favourite.json", "reader.json")
+AGENT_STATE_DIR = os.getenv("SIGNAL_ROOM_AGENT_STATE", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agents", "state"))
+CONTROL_IDS = tuple(x.strip() for x in os.getenv("SIGNAL_ROOM_CONTROL_IDS", "").split(",") if x.strip())
+CONTROL_REFRESH_SECONDS = 60
 MIN_RESOLVED_FOR_RANK = 30
 SHRINK_N = 30
 BATCH_WINDOW_SECONDS = 60   # calls posted within a minute of each other count as one try in the luck odds

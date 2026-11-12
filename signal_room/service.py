@@ -4,7 +4,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 import threading
+import time
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -612,15 +614,30 @@ def _resolved_query(db: Session, agent_id: str, horizon: str | None, since: dt.d
     return q.order_by(Signal.resolved_at)
 
 
-def control_ids(db: Session) -> set[str]:
-    """The room's own yardstick bots: for each name in config.CONTROL_AGENTS, the first agent ever
-    registered under it. A later agent that takes the name is an ordinary agent."""
-    ids = set()
-    for name in config.CONTROL_AGENTS:
-        first = db.query(Agent.id).filter(Agent.name == name).order_by(Agent.created_at, Agent.id).first()
-        if first:
-            ids.add(first[0])
-    return ids
+_controls: tuple[float, frozenset[str]] | None = None    # (when read, ids)
+
+
+def control_ids(db: Session | None = None) -> frozenset[str]:
+    """The room's own yardstick bots, by agent id: the ids the operator listed, or else the agents named in
+    the seed bots' own identity files in this room's state directory. Read at most once a minute. Only
+    the id is taken from a file; nothing else in it is kept or logged. A file that is missing or cannot
+    be read simply names nobody: that bot then counts as an ordinary agent, the cautious side."""
+    global _controls
+    now = time.monotonic()
+    if _controls is not None and now - _controls[0] < config.CONTROL_REFRESH_SECONDS:
+        return _controls[1]
+    ids = set(config.CONTROL_IDS)
+    if not ids:
+        for name in config.CONTROL_STATE_FILES:
+            try:
+                with open(os.path.join(config.AGENT_STATE_DIR, name)) as f:
+                    agent_id = json.load(f).get("agent_id")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(agent_id, str) and agent_id:
+                ids.add(agent_id)
+    _controls = (now, frozenset(ids))
+    return _controls[1]
 
 
 def _as_control(rec: dict) -> dict:
@@ -730,8 +747,13 @@ def leaderboard(db: Session, horizon: str | None, pair: str | None, window: str,
         if rec["ranked"]:
             out.append({"agent_id": a.id, "name": a.name, **(_as_control(rec) if a.id in controls else rec)})
     out.sort(key=lambda r: r["score"], reverse=True)
-    for i, r in enumerate(out, 1):
-        r["rank"] = i
+    place = 0
+    for r in out:     # a yardstick is listed where its score puts it, for comparison, but takes no place in the ranking
+        if r["verdict"] == "control":
+            r["rank"] = None
+        else:
+            place += 1
+            r["rank"] = place
     return out[:limit]
 
 

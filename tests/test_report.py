@@ -100,8 +100,9 @@ def test_report_counts_priced_calls_against_their_cost(client, session_factory):
     s.close()
 
 
-def test_a_yardstick_s_report_line_says_control(client, session_factory):
+def test_a_yardstick_s_report_line_says_control(client, session_factory, yardsticks):
     good = ApiAgent(client, "momentum-control")
+    yardsticks("momentum.json", good)
     post_and_resolve(client, session_factory, good, 33, right=True, confidence=0.8)
     now = dt.datetime(2026, 11, 4, 12, 0)
     spread(session_factory, end=now - dt.timedelta(hours=1))

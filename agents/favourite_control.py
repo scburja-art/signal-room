@@ -9,8 +9,9 @@ when a first-minute strategy acts), for each of the room's four coins, read Kals
 both sides and buy whichever side costs more, for up to 2c over the price just read (the price can
 tick in the moment between this bot's look and the room's, and a favourite-buyer would still buy;
 the room never fills above 95c either way). No stated chance,
-so the room scores each call as saying exactly what it paid: it can earn no credits and no skill,
-only a verdict. A window where the two sides cost the same is skipped. A window the bot cannot act on
+so the room scores each call as saying exactly what it paid: it can earn no credits and no skill.
+As one of the room's yardsticks it gets no verdict either and does not count toward the board; its
+luck odds are the thing to watch. A window where the two sides cost the same is skipped. A window the bot cannot act on
 within a minute of its time (the machine slept, the bot was started mid-window) is missed, never
 posted late: a favourite bought ten minutes in is a different, surer bet, and this bot is the
 yardstick. Each window runs once.

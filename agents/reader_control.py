@@ -17,7 +17,8 @@ from .client import SignalRoomClient, SignalRoomError
 log = logging.getLogger("agents.reader")
 RESERVE = 1.0
 INTERVAL_SECONDS = 3600
-PREFERENCE = ("proven", "probably_not_luck", "worse_than_chance", "luck", "unproven")
+# The room's own yardsticks ("control") come last: they are measuring sticks, not authors worth paying for.
+PREFERENCE = ("proven", "probably_not_luck", "worse_than_chance", "luck", "unproven", "control")
 
 
 def load(path: str) -> dict:

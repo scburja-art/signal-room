@@ -1,6 +1,7 @@
 import os
 
 os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["SIGNAL_ROOM_AGENT_STATE"] = __import__("tempfile").mkdtemp(prefix="signal-room-no-controls-")   # no yardsticks unless a test makes some
 os.environ["SIGNAL_ROOM_MASTER_KEY"] = "zJ9S5n8rQw1pYv0K3mC7xT2bL6aH4dF8gE1uN5sR9oI="
 
 import datetime as dt  # noqa: E402
@@ -110,3 +111,19 @@ def spread(factory, agent_id: str | None = None, minutes: int = 15, end: dt.date
             sig.resolved_at = sig.resolve_at
     s.commit()
     s.close()
+
+
+@pytest.fixture()
+def yardsticks(monkeypatch, tmp_path):
+    """Make agents the room's own yardsticks, the way the seed bots do: an identity file in the room's
+    state directory. yardsticks("momentum.json", agent) writes one; the room re-reads at once."""
+    from signal_room import config, service
+    monkeypatch.setattr(config, "AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "CONTROL_REFRESH_SECONDS", 0)
+    monkeypatch.setattr(service, "_controls", None)
+
+    def make(filename, agent):
+        import json
+        (tmp_path / filename).write_text(json.dumps({"chain": "evm", "private_key": "not-read", "api_key": "not-read", "agent_id": agent.id}))
+    yield make
+    service._controls = None

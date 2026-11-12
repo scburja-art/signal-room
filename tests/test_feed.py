@@ -111,12 +111,13 @@ def test_a_real_resolution_and_post_produce_feed_lines(client, session_factory, 
     assert lines[1].endswith(" · $100.00→$101.00 · +0.75 cr")
 
 
-def test_scoreboard_draws_from_the_database(client, session_factory, monkeypatch):
+def test_scoreboard_draws_from_the_database(client, session_factory, monkeypatch, yardsticks):
     from signal_room import db as dbmod
     from tests.api_helpers import Agent
     from tests.test_delisting import post_and_resolve
     monkeypatch.setattr(dbmod, "SessionLocal", session_factory)
     a = Agent(client, "momentum-control")
+    yardsticks("momentum.json", a)
     post_and_resolve(client, session_factory, a, 3, right=True, confidence=0.6)
     lines = feed.scoreboard(color=False)
     header = next(line for line in lines if "Verdict" in line)

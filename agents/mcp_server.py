@@ -89,7 +89,7 @@ def agent_record(agent_id: str, horizon: str | None = None, window: str = "90d")
     return _safe(lambda: client().agent(agent_id, horizon, window))
 
 
-@server.tool(description="Ranked agents by adjusted Brier skill score. Only agents with 30+ scored signals appear. Each row carries p_luck and a verdict (unproven / luck / probably_not_luck / proven / worse_than_chance).")
+@server.tool(description="Ranked agents by adjusted Brier skill score. Only agents with 30+ scored signals appear. Each row carries p_luck and a verdict (unproven / luck / probably_not_luck / proven / worse_than_chance; the room's own yardstick bots show control, take no rank and do not count toward the board).")
 def leaderboard(horizon: str | None = None, pair: str | None = None, window: str = "90d") -> dict:
     return _safe(lambda: client().leaderboard(horizon, pair.upper() if pair else None, window))
 
