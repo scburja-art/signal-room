@@ -110,9 +110,8 @@ def test_an_owner_running_wallets_one_after_another_is_held_to_the_line():
     assert attacks.one_after_another(True) <= attacks.LEVEL                      # k x (k + 1) is
 
 
-def test_what_is_known_to_be_open_is_on_the_page():
-    assert [name for name, _ in attacks.OPEN] == ["Slice views"]      # found by the review of 2026-11-12
-    assert all(text in attacks.page() for _, text in attacks.OPEN)
+def test_nothing_is_known_to_be_open():
+    assert attacks.OPEN == [] and "Nothing known today" in attacks.page()
 
 
 def aged(factory, agent_id, days):
@@ -166,6 +165,44 @@ def test_a_verdict_rests_on_the_whole_record_whatever_window_is_asked_for(client
         for key in service.WHOLE_RECORD:
             assert view[key] == whole[key], (window, key)                      # what the verdict rests on
     db.close()
+
+
+def test_a_view_of_one_coin_never_gets_a_verdict_of_its_own(client, session_factory):
+    """Forty right calls on BTC and forty wrong on ETH: a coin flip overall, and a perfect record if you
+    look at BTC alone. Whichever way the record is sliced, the verdict is the whole record's."""
+    bot = Agent(client, "two-coins")
+    post_and_resolve(client, session_factory, bot, 40, right=True, pair="BTC")
+    post_and_resolve(client, session_factory, bot, 40, right=False, pair="ETH")
+    spread(session_factory)
+    db = session_factory()
+    whole = service.agent_record(db, bot.id, None, "all")
+    assert whole["n"] == 80 and whole["hit_rate"] == 0.5 and whole["verdict"] == "luck"
+    btc = next(r for r in service.leaderboard(db, None, "BTC", "all") if r["agent_id"] == bot.id)
+    assert btc["n"] == 40 and btc["hit_rate"] == 1.0 and btc["exploratory"]         # the view shows what happened in it
+    # By hand: 40 straight wins alone would be far past "proven" (the 50% stake alone turns 1 into 1.5^40).
+    alone = service._record(service._resolved_query(db, bot.id, None, None).filter(service.Signal.pair == "BTC").all(), 1)
+    assert alone["verdict"] == "proven"
+    for key in service.WHOLE_RECORD:
+        assert btc[key] == whole[key], key                                           # and carries the whole record's verdict
+    horizon = service.agent_record(db, bot.id, "15m", "90d")
+    assert horizon["verdict"] == whole["verdict"] and horizon["p_luck"] == whole["p_luck"]
+    db.close()
+
+
+def test_a_read_is_priced_off_the_whole_record(client, session_factory):
+    """The same two-coin agent posts an open BTC call. Its BTC view alone would read "proven" (4 credits);
+    on its whole record it is luck, so the read costs 1."""
+    bot, reader = Agent(client, "two-coins"), Agent(client, "reader")
+    post_and_resolve(client, session_factory, bot, 40, right=True, pair="BTC")
+    post_and_resolve(client, session_factory, bot, 40, right=False, pair="ETH")
+    spread(session_factory)
+    from tests.conftest import set_price
+    set_price(session_factory, "BTC", 100.0)
+    assert bot.post("/signals", {"pair": "BTC", "horizon": "15m", "direction": "long", "confidence": 0.6}).status_code == 201
+    listing = reader.get("/room").json()
+    rows = listing["signals"] if isinstance(listing, dict) else listing
+    mine = next(r for r in rows if r["agent_id"] == bot.id)
+    assert mine["agent_verdict"] == "luck" and mine["read_cost"] == 1
 
 
 def test_a_yardstick_never_counts(client, session_factory, yardsticks):

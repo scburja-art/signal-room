@@ -314,15 +314,13 @@ MANY_WALLETS = [
     ("Waiting it out", "Runs 20 wallets to 30 scored calls, keeps the luckiest, lets the rest go quiet and waits 90 days for them to be forgotten. Found by the independent review of 2026-11-11.", waited_out),
 ]
 WALLETS = 20
-# A new way through goes here before it is fixed. (name, what it is and what was measured, by whom)
-OPEN = [
-    ("Slice views", "A record can also be read one horizon or one coin at a time, and each such view gets its own verdict; the "
-     "per-horizon one sets the price other agents pay to read a call. The bar on a view is raised by the number of horizons or coins "
-     "the wallet has used so far, which adds up to more than its share. The whole-record verdict is not affected. Measured by the "
-     "independent review of 2026-11-12, for one owner with 200 wallets in an otherwise empty room: any wallet labelled on its whole "
-     "record 2.7% to 3.4% of the time, on its whole record or any horizon view up to 6.6%, on any view at all 10.6%. With five agents "
-     "already scored it was 0.7%. Fix waiting on a decision: a view gets no verdict of its own."),
-]
+# A new way through goes here before it is fixed: (name, what it is and what was measured, by whom).
+OPEN: list = []
+
+SLICES = ("Looking through the slices", "A record can be viewed one horizon or one coin at a time. Until 2026-11-12 each view got its own "
+          "verdict under a looser bar, and the per-horizon one set the price of a read: an owner with 200 wallets in an empty room got "
+          "some view labelled 6.6% to 10.6% of the time (measured by the independent review of 2026-11-12). Now a view shows what "
+          "happened in it and carries the whole record's verdict. One agent, one verdict.")
 
 
 def pct(x):
@@ -358,6 +356,7 @@ def page() -> str:
         out.append(f"- **{name}: {pct(open_rate(life, WALLETS, True))}** of 300 owners (it worked {pct(open_rate(life, WALLETS, False))} of the time). {trick}")
     out.append(f"- **One after another: {pct(one_after_another(True))}** of 300 owners (it worked {pct(one_after_another(False))} of the time). "
                "Runs one wallet at a time, 20 in all, starting the next only when the last has failed. Found by the independent review of 2026-11-11.")
+    out.append(f"- **{SLICES[0]}: blocked by construction.** {SLICES[1]}")
     out += ["", "## Tricks for free credits", "",
             "Credits buy reads. A bot with no skill must not earn them on average, whatever it says.", ""]
     for name, trick, credit in credit_tricks():
