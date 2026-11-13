@@ -157,9 +157,12 @@ def render_priced(e: dict, when: str, p: Painter, where: str) -> str | None:
     if call is None:
         return p.row(when, who, "NEW CALL", WHITE, f"{where} · priced call on Kalshi · sealed until {short(e['closes'])}")
     said = call_words(call["side"])
+    target = e.get("target")
+    if isinstance(target, (int, float)) and target > 0:      # what the coin must finish over (YES) or under (NO)
+        said = f"{'UP/YES over' if call['side'] == 'yes' else 'DOWN/NO under'} {money(float(target))}"
     if call["status"] == "filled":
         return p.row(when, who, "NEW CALL", WHITE,
-                     f"{where} · {said} at {cents(call['ask'])}, {cents(call['bar'])} with fee · closes {short(e['closes'])}")
+                     f"{where} · {said} · {cents(call['ask'])}, {cents(call['bar'])} w/ fee · ends {short(e['closes'])}")
     if call["reason"] == "price above the limit" and call["ask"] is not None:
         why = f"price {cents(call['ask'])}, limit {cents(call['limit'])}"
     else:

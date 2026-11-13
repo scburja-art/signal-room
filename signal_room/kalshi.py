@@ -186,6 +186,22 @@ def quote(market: dict, side: str) -> Quote:
                  ask=ask if 0.0 < ask < 1.0 else None, bid=bid if 0.0 < bid < 1.0 else None, size=size)
 
 
+def target(market: dict) -> float | None:
+    """The coin price a 15-minute market is decided against: YES wins if the coin finishes at or above it.
+    It is the market's own, the same for both sides, so it gives no call away. Shown, never scored on:
+    None whenever Kalshi's record does not state it plainly."""
+    try:
+        if market.get("strike_type") != "greater_or_equal":
+            return None
+        value = market.get("floor_strike")
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) and value > 0 else None
+    except (AttributeError, ValueError, TypeError):
+        return None
+
+
 def result(market: dict) -> str | None:
     """'yes' or 'no' once Kalshi has finalised the market, None while it has not. A finalised market
     with any other result can never be scored and raises NoResult."""

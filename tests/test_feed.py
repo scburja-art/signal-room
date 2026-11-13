@@ -181,7 +181,15 @@ def test_a_priced_call_shows_its_side_and_cost_only_from_the_local_database(monk
     # On the operator's machine the side and the price come from the database, never from the log line.
     monkeypatch.setattr(feed, "sealed_priced", lambda sid: {"side": "no", "limit": 0.85, "status": "filled", "ask": 0.85, "bar": 0.86, "reason": ""})
     here = feed.render(priced("decided"), color=False)
-    assert " NEW CALL   XRP · 15m · DOWN · NO at 85¢, 86¢ with fee · closes " in here
+    assert " NEW CALL   XRP · 15m · DOWN · NO · 85¢, 86¢ w/ fee · ends " in here
+    # With the market's target price, the line says what the coin has to finish under (NO) or over (YES).
+    there = feed.render(priced("decided", target=2012.1), color=False)
+    assert " NEW CALL   XRP · 15m · DOWN/NO under $2,012.10 · 85¢, 86¢ w/ fee · ends " in there
+    widest = feed.render(ev(kind="priced", agent="kakalshi-crypto-first-minute-priced", pair="BTC", horizon="15m",
+                            market="KXBTC15M-26NOV111345-45", signal_id="s1", fill="decided",
+                            closes="2026-10-31T22:45:00", target=104402.91), color=False)
+    assert "DOWN/NO under $104,403 · " in widest and len(widest) <= 100, (len(widest), widest)
+    assert "under" not in feed.render(priced("decided", target=None), color=False)
 
 
 def test_not_filled_and_waiting_say_why(monkeypatch):
@@ -189,6 +197,7 @@ def test_not_filled_and_waiting_say_why(monkeypatch):
                                                             "reason": "price above the limit"})
     out = feed.render(priced("decided"), color=False)    # the log line never says which way the fill went
     assert " NOT FILLED XRP · 15m · UP · YES · price 33.5¢, limit 30¢ · not scored" in out
+    assert " NOT FILLED XRP · 15m · UP/YES over $1.1494 · price 33.5¢, limit 30¢ · not scored" in feed.render(priced("decided", target=1.1494), color=False)
     monkeypatch.setattr(feed, "sealed_priced", lambda sid: {"side": "no", "limit": 0.9, "status": "unfilled", "ask": 0.85, "bar": None,
                                                             "reason": "under 10 on offer"})
     assert "DOWN · NO · under 10 on offer · not scored" in feed.render(priced("decided"), color=False)

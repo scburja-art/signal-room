@@ -194,6 +194,7 @@ def test_nothing_about_an_open_priced_call_gives_its_side_away(client, session_f
     line = next(r.getMessage() for r in caplog.records if "EVENT" in r.getMessage())
     assert '"kind": "priced"' in line and '"fill": "decided"' in line          # that a decision was made, never which
     assert not any(w in line for w in ('"side"', "0.85", "0.86", '"no"', "filled"))
+    assert '"target": 1.1494' in line      # the market's own target price: the same for both sides, so it may be shown
     # Its author sees its own call in full; a paying reader does too.
     mine = author.get("/me").json()["signals"][0]
     assert mine["side"] == "no" and mine["limit"] == 0.85 and mine["fill"]["bar"] == 0.86

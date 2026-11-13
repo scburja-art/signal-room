@@ -333,10 +333,11 @@ def submit_priced(db: Session, agent: Agent, venue: str, market: str, side: str,
 
     # The stamp comes first, then the look: the price is one the room read after the call landed.
     now = utcnow()
-    quote, read_at = None, None
+    quote, read_at, target = None, None, None
     try:
         kalshi.check_fee_rule(series)
-        quote = kalshi.quote(kalshi.fetch_market(market), side)
+        record = kalshi.fetch_market(market)
+        quote, target = kalshi.quote(record, side), kalshi.target(record)
         read_at = max(utcnow(), now)
     except kalshi.NoSuchMarket:
         raise HTTPException(422, "Kalshi has no such market")
@@ -370,9 +371,10 @@ def submit_priced(db: Session, agent: Agent, venue: str, market: str, side: str,
         log.error("priced signal insert failed: %s", e.orig)
         raise HTTPException(500, "the room could not store the signal; see the server log")
     sig.seen = _seen(sig, body)   # for the author's receipt only; not a column
-    # No side, no price, and not which way the fill went: any of them could give an open call away.
+    # No side, no price, and not which way the fill went: any of them could give an open call away. The
+    # market's target price is the market's own, the same whichever side was taken, so it may be shown.
     event("priced", agent=agent.name or agent.id, pair=pair, horizon=horizon, market=market, signal_id=sig.id,
-          fill=sig.fill or "waiting", closes=sig.resolve_at.isoformat())
+          fill=sig.fill or "waiting", closes=sig.resolve_at.isoformat(), target=target)
     return sig
 
 
@@ -383,10 +385,11 @@ def fill_from_history(db: Session, sig: Signal, now: dt.datetime) -> bool:
     if now < sig.submitted_at.replace(second=0, microsecond=0) + dt.timedelta(seconds=70):
         return False                               # that minute's record is not complete yet
     body = unseal(sig.agent_id, sig.body_cipher)
-    decided = None                                 # (status, why, ask, bid, size, closes)
+    decided, target = None, None                   # (status, why, ask, bid, size, closes)
     try:
         kalshi.check_fee_rule(kalshi.parse_ticker(sig.market)[0])
-        quote = kalshi.quote(kalshi.fetch_market(sig.market), body["side"])
+        record = kalshi.fetch_market(sig.market)
+        quote, target = kalshi.quote(record, body["side"]), kalshi.target(record)
         if not (quote.open_time <= sig.submitted_at < quote.close_time):
             # Nothing to look up: no minute of that market holds the call.
             decided = ("unfilled", "market was not open", None, None, 0.0, max(quote.close_time, sig.submitted_at))
@@ -416,7 +419,7 @@ def fill_from_history(db: Session, sig: Signal, now: dt.datetime) -> bool:
         _set_fill(sig, body, status, why, sig.submitted_at, ask, bid, size, "history", closes)
         db.commit()
     event("priced", agent=_name(db, sig.agent_id), pair=sig.pair, horizon=sig.horizon, market=sig.market,
-          signal_id=sig.id, fill=sig.fill, closes=sig.resolve_at.isoformat())
+          signal_id=sig.id, fill=sig.fill, closes=sig.resolve_at.isoformat(), target=target)
     return True
 
 

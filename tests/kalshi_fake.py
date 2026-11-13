@@ -34,8 +34,10 @@ class FakeKalshi:
         self.calls: list[str] = []
 
     def add_market(self, ticker: str, open_time: dt.datetime, yes_bid: float = 0.50, yes_ask: float = 0.51,
-                   size: float = 5000.0, status: str = "active", result: str = "", minutes: int = 15) -> dict:
+                   size: float = 5000.0, status: str = "active", result: str = "", minutes: int = 15,
+                   floor_strike: float | None = 1.1494) -> dict:
         m = {"ticker": ticker, "status": status, "result": result, "market_type": "binary",
+             "strike_type": "greater_or_equal", "floor_strike": floor_strike,
              "open_time": iso(open_time), "close_time": iso(open_time + dt.timedelta(minutes=minutes)),
              "yes_bid_dollars": d(yes_bid), "yes_ask_dollars": d(yes_ask),
              "no_bid_dollars": d(1 - yes_ask), "no_ask_dollars": d(1 - yes_bid),
