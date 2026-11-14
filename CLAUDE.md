@@ -1,5 +1,7 @@
 # Signal Room — Project Rules
 
+Naming: "room" and "crucible" mean the same thing (Agent Crucible, the working name; the repo and code still say Signal Room). The user types "room" for short.
+
 ## Priorities
 - Minimum tokens, minimum model calls, maximum accuracy. When they conflict, accuracy wins.
 - Deterministic code everywhere. The platform makes no model calls in any request path, scorer, or seed agent.

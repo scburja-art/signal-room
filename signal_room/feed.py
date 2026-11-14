@@ -301,6 +301,33 @@ def days_text(days: float | None) -> str:
     return f"~{d} day{'s' if d != 1 else ''}"
 
 
+DAY_ZONE = "America/New_York"   # "today" on the scoreboard runs from midnight here, by its name, so daylight time is handled
+
+
+def _utcnow() -> dt.datetime:
+    """The moment, read fresh every time it is asked: never a date remembered from when the feed started."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def day_start(now: dt.datetime | None = None) -> dt.datetime:
+    """Midnight of the current day in DAY_ZONE, as a naive UTC time (how the database stores times)."""
+    from zoneinfo import ZoneInfo
+    local = (now or _utcnow()).astimezone(ZoneInfo(DAY_ZONE))
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(dt.timezone.utc).replace(tzinfo=None)
+
+
+def today_record(db, agent_id: str, now: dt.datetime | None = None) -> tuple[int, int]:
+    """Right and wrong calls this agent has had scored since midnight (DAY_ZONE)."""
+    from .db import Signal
+    now = now or _utcnow()
+    upto = now.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    rows = (db.query(Signal.result).filter(Signal.agent_id == agent_id, Signal.result.in_(("right", "wrong")),
+                                           Signal.resolved_at >= day_start(now), Signal.resolved_at <= upto).all())
+    right = sum(1 for (r,) in rows if r == "right")
+    return right, len(rows) - right
+
+
 def scoreboard(color: bool = True) -> list[str]:
     """Every bot's standing in one short block, from the database. One header row labels the
     columns so each line holds only values."""
@@ -327,7 +354,8 @@ def scoreboard(color: bool = True) -> list[str]:
         vw = max([len("Verdict")] + [len(VERDICTS.get(r["verdict"], r["verdict"])) for _, r in bots if r["verdict"] != "closed"])
         title = f" Scoreboard · {dt.datetime.now().strftime('%I:%M %p').lstrip('0')} "
         out = ["", p(BOLD, f"──{title}" + "─" * max(4, 70 - len(title)))]
-        out.append(p(GRAY, f"  {'Bot':<13} {'Verdict':<{vw}}  {'Right':>5}   {'vs. its bar':<13}  {'Calls':>5}   Next step"))
+        out.append(p(GRAY, f"  {'Bot':<13} {'Verdict':<{vw}}  {'Right':>5}   {'vs. its bar':<13}  {'Calls':>5}  {'Today':>6}   Next step"))
+        now = _utcnow()
         for a, r in bots:
             name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
             verdict = VERDICTS.get(r["verdict"], r["verdict"])
@@ -342,14 +370,17 @@ def scoreboard(color: bool = True) -> list[str]:
                 skill, scode = versus_coin_flip(r["skill_points"])
                 right = f"{r['hit_rate'] * 100:.0f}%"
                 nxt = days_text(r.get("days_to_next")) if r["verdict"] not in ("unproven", "control", "closed") else "—"
-            out.append(f"  {name} {p(vcode, f'{verdict:<{vw}}')}  {right:>5}   {p(scode, f'{skill:<13}')}  {r['n']:>5}   "
+            won, lost = today_record(db, a.id, now)
+            today = f"{won}-{lost}" if won or lost else "—"
+            out.append(f"  {name} {p(vcode, f'{verdict:<{vw}}')}  {right:>5}   {p(scode, f'{skill:<13}')}  {r['n']:>5}  "
+                       + (p(GRAY, f"{today:>6}") if today == "—" else f"{today:>6}") + "   "
                        + (p(GRAY, nxt) if nxt == "—" else nxt))
         if readers:
             out.append(p(GRAY, "  ─ ─ ─"))
             for a, n, right, closed, credits in readers:
                 name = p(color_of(a.name) + BOLD, f"{display(a.name):<13}")
                 out.append(f"  {name} {n} paid read{'s' if n != 1 else ''} · {right} of {closed} right · {credits:g} credit{'' if credits == 1 else 's'} left")
-        out.append(p(GRAY, "  Ladder: Unproven → Luck → Probably not luck → Proven · cr = credits"))
+        out.append(p(GRAY, "  Ladder: Unproven → Luck → Probably not luck → Proven · cr = credits · Today: right-wrong since midnight ET"))
         out.append(p(GRAY, "  Bar: what a call cost. A coin flip for a plain call, price + fee for a priced one."))
         out.append(p(BOLD, "─" * 72))
         out.append("")

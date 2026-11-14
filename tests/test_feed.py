@@ -1,4 +1,5 @@
 """The live feed: plain sentences, routine noise hidden, each bot named and colored, results shown."""
+import datetime as dt
 import json
 
 from signal_room import feed
@@ -119,13 +120,20 @@ def test_scoreboard_draws_from_the_database(client, session_factory, monkeypatch
     a = Agent(client, "momentum-control")
     yardsticks("momentum.json", a)
     post_and_resolve(client, session_factory, a, 3, right=True, confidence=0.6)
+    from signal_room.db import Signal
+    db = session_factory()
+    last = max(s.resolved_at for s in db.query(Signal).all())
+    db.close()
+    # The scoreboard reads the clock itself; pin it to a minute after the last call was scored, the same day.
+    monkeypatch.setattr(feed, "_utcnow", lambda: (last + dt.timedelta(minutes=1)).replace(tzinfo=dt.timezone.utc))
+    monkeypatch.setattr(feed, "day_start", lambda now=None: last - dt.timedelta(hours=1))
     lines = feed.scoreboard(color=False)
     header = next(line for line in lines if "Verdict" in line)
     row = next(line for line in lines if "Momentum" in line)
-    assert header.split() == ["Bot", "Verdict", "Right", "vs.", "its", "bar", "Calls", "Next", "step"]
+    assert header.split() == ["Bot", "Verdict", "Right", "vs.", "its", "bar", "Calls", "Today", "Next", "step"]
     # 3 of 3 right at 60%: skill = 1 - 0.16/0.25 = +0.36 → 36 points better. Momentum is one of the room's
     # yardsticks: it shows as a control, not a verdict, and has no next step.
-    assert row.split() == ["Momentum", "Control", "100%", "▲", "36", "better", "3", "—"]
+    assert row.split() == ["Momentum", "Control", "100%", "▲", "36", "better", "3", "3-0", "—"]
     assert header.index("Calls") + len("Calls") == row.index("3 ") + 1      # numbers right-align under their header
     assert any("Ladder: Unproven → Luck → Probably not luck → Proven" in line for line in lines)
 
@@ -230,3 +238,43 @@ def test_priced_lines_fit_a_101_column_window(monkeypatch):
                                 closed="2026-10-31T22:45:00"), color=False))
     for line in lines:
         assert len(line) <= 101, (len(line), line)
+
+
+# ---------- today's right-wrong, from midnight Eastern ----------
+
+def test_the_day_starts_at_midnight_eastern_whatever_the_season():
+    utc = dt.timezone.utc
+    # November: Eastern is UTC-5, so midnight is 05:00 UTC. 11:59 PM and 12:01 AM fall on different days.
+    assert feed.day_start(dt.datetime(2026, 11, 15, 4, 59, tzinfo=utc)) == dt.datetime(2026, 11, 14, 5, 0)
+    assert feed.day_start(dt.datetime(2026, 11, 15, 5, 1, tzinfo=utc)) == dt.datetime(2026, 11, 15, 5, 0)
+    # July: daylight time, UTC-4, so midnight is 04:00 UTC.
+    assert feed.day_start(dt.datetime(2027, 7, 1, 12, 0, tzinfo=utc)) == dt.datetime(2027, 7, 1, 4, 0)
+    # The morning the clocks go forward (2027-03-14): that day still began at midnight standard time.
+    assert feed.day_start(dt.datetime(2027, 3, 14, 15, 0, tzinfo=utc)) == dt.datetime(2027, 3, 14, 5, 0)
+    assert feed.day_start(dt.datetime(2027, 3, 15, 15, 0, tzinfo=utc)) == dt.datetime(2027, 3, 15, 4, 0)
+
+
+def test_today_counts_only_calls_scored_since_midnight_and_starts_over_at_the_next(client, session_factory):
+    from tests.api_helpers import Agent
+    from tests.test_delisting import post_and_resolve
+    from signal_room.db import Signal
+    a = Agent(client, "a")
+    post_and_resolve(client, session_factory, a, 3, right=True)
+    post_and_resolve(client, session_factory, a, 1, right=False)
+    db = session_factory()
+    rows = db.query(Signal).filter(Signal.agent_id == a.id).order_by(Signal.submitted_at).all()
+    # By hand: two right calls scored at 11:50 PM ET (04:50 UTC), one right and one wrong at 12:10 AM ET (05:10 UTC).
+    for s, at in zip(rows, ("04:50", "04:50", "05:10", "05:10")):
+        s.resolved_at = dt.datetime(2026, 11, 15, int(at[:2]), int(at[3:]))
+    db.commit()
+    late = dt.datetime(2026, 11, 15, 4, 55, tzinfo=dt.timezone.utc)      # 11:55 PM ET
+    early = dt.datetime(2026, 11, 15, 5, 30, tzinfo=dt.timezone.utc)     # 12:30 AM ET, the next day
+    assert feed.today_record(db, a.id, late) == (2, 0)
+    assert feed.today_record(db, a.id, early) == (1, 1)
+    db.close()
+
+
+def test_the_clock_is_read_fresh_every_time(monkeypatch):
+    seen = iter([dt.datetime(2026, 11, 15, 4, 59, tzinfo=dt.timezone.utc), dt.datetime(2026, 11, 15, 5, 1, tzinfo=dt.timezone.utc)])
+    monkeypatch.setattr(feed, "_utcnow", lambda: next(seen))
+    assert feed.day_start() != feed.day_start()                      # a feed left running rolls over at midnight
